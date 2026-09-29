@@ -4,60 +4,103 @@ capabilities and sidecars; a host file declares what it grants.
 One static Rust binary applies both to a Docker or Podman container, on a laptop, an agent host or a CI runner. 
 Linux first, shell first, no editor required
 
-> Early MVP: `vz` pulls or builds the image in `vz.yml`, runs it to completion and prints its output.
+> Early MVP: `vz` opens a shell, as you, in the image `vz.yml` names, with the repository mounted.
+
+- [Build](#build)
+- [Use](#use)
+- [Images](#images)
+- [Your user in the image](#your-user-in-the-image)
+- [Logging](#logging)
+- [Test](#test)
+- [License](#license)
 
 ## Build
 
-Rust 1.95.0 and the musl target are pinned in `rust-toolchain.toml`; rustup installs them.
-
 ```sh
-cargo build --release
+cargo build --release    # → target/x86_64-unknown-linux-musl/release/vz
 ```
 
-The binary is static: `target/x86_64-unknown-linux-musl/release/vz`.
-Build it inside a container, run it on any Linux host.
+Rust 1.95.0 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
+because `vz` mounts itself into every container it starts: build it anywhere, run it on any Linux host.
 
 ## Use
 
-`vz.yml` in the current directory names an image to pull:
-
-```yaml
-image: hello-world
-```
-
-or a Dockerfile to build:
-
-```yaml
-image:
-  dockerfile: Dockerfile
-  context: .                  # optional, default: the current directory
-  args: { GREETING: hello }   # optional build args
-```
-
 ```sh
-vz    # pulls or builds the image if missing, runs it, removes the container
+vz                  # a shell: bash, else sh
+vz -- cargo test    # one command instead
 ```
 
-`vz` exits with the container's exit code.
+`vz` reads `vz.yml` at the git root, pulls or builds the image if missing, and runs a container
+that is removed on exit; `vz` exits with its exit code. Inside:
 
-A built image is tagged `vz-<directory>:<hash of the Dockerfile and args>`,
-and builds only when that tag is missing. Editing the Dockerfile or args rebuilds;
-editing a file the Dockerfile copies does not. Remove the image to force a rebuild.
-`vz` drives the engine through the `docker` CLI, via
-[docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
-so builds honour `.dockerignore`.
-
-This repository's own `Dockerfile` is the Rust toolchain with `vz` built from the checkout.
+- the repository is mounted read-write at its host path; the working directory is yours;
+- you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
+- `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set.
 
 Unknown keys in `vz.yml` are refused, naming the line.
 
+## Images
+
+```yaml
+image: hello-world            # pull
+```
+
+```yaml
+image:                        # build; paths relative to the git root
+  dockerfile: Dockerfile
+  context: .                  # optional, default: the git root
+  args: { GREETING: hello }   # optional
+```
+
+- A built image is tagged `vz-<dir>:<hash of Dockerfile + args>` and builds only when missing.
+  Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
+- Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
+  so `.dockerignore` applies.
+- This repository's `Dockerfile`: the Rust toolchain, with `vz` built from the checkout.
+
+## Your user in the image
+
+**Default — added at start.** The image needs no user. `vz` starts the container as root with
+itself as entrypoint, which adds your `/etc/passwd` and `/etc/group` lines, creates your home,
+then becomes you. One image serves everyone; your home starts empty.
+
+**Opt-in — baked at build.** For tools installed into your home or files owned by you, declare
+any of these build args; `vz` passes your values:
+
+| Arg | Value | | Arg | Value |
+|---|---|---|---|---|
+| `VZ_USER` | user name | | `VZ_GROUP` | group name |
+| `VZ_UID` | uid | | `VZ_HOME` | home path |
+| `VZ_GID` | primary gid | | | |
+
+```dockerfile
+ARG VZ_USER
+ARG VZ_UID
+ARG VZ_GID
+ARG VZ_GROUP
+ARG VZ_HOME
+RUN groupadd -g "$VZ_GID" "$VZ_GROUP" \
+ && useradd -u "$VZ_UID" -g "$VZ_GID" -d "$VZ_HOME" -m -s /bin/bash "$VZ_USER"
+# Later build steps run as you.
+USER $VZ_USER
+```
+
+Alpine: `addgroup -g "$VZ_GID" "$VZ_GROUP" && adduser -D -u "$VZ_UID" -G "$VZ_GROUP" -h "$VZ_HOME" "$VZ_USER"`.
+
+- Declared args join the image hash, so such an image is built per user.
+- At start, a baked user must match you: name, uid and home; group name and gid.
+  Anything else holding your name, uid or gid is refused, naming it.
+- Always pass `-d "$VZ_HOME"`. On Ubuntu 23.04+, `userdel -r ubuntu` first: it holds uid 1000.
+- `USER` affects only the build; the container always starts as root for the entrypoint.
+- Don't set these in `vz.yml` `args`: they would override yours and fail the match.
+
 ## Logging
 
-Logs go to stderr, filtered by `VZ_LOG` (default `warn,vz=info`):
+Stderr, filtered by `VZ_LOG` (default `warn,vz=info`):
 
 ```sh
 VZ_LOG=vz=debug vz    # each step, and every docker command in full
-VZ_LOG=debug vz       # also docker-wrapper's spans: each CLI call, its exit code and output size
+VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, output size
 ```
 
 ## Test
@@ -75,4 +118,3 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
-
