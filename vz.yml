@@ -12,6 +12,9 @@ mounts:
   # All repositories, read-only. This one stays read-write: the repository's
   # own mount is deeper and lands on top.
   ~/repos: ro
+  # ssh as on the host: keys, config and known hosts, read-only. The keys are
+  # readable by everything inside the container.
+  ~/.ssh: ro
 
 share:
   # The host's docker daemon: `vz -- just examples` runs the example tests
