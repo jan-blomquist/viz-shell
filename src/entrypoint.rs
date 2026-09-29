@@ -11,19 +11,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow};
+use nix::unistd::{Gid, Uid, setgid, setgroups, setuid};
 use tracing::debug;
 
-use crate::constants::{GROUP_FILE, MOUNTINFO_FILE, PASSWD_FILE, SHELLS};
-use crate::user::{User, with_line};
+use crate::constants::{GROUP_FILE, GROUPS_ENV, MOUNTINFO_FILE, PASSWD_FILE, SHELLS};
+use crate::user::{ExtraGroup, User, with_line};
 
 /// Returns only on failure; on success the command replaces this process.
 pub fn run(command: &[String]) -> anyhow::Result<()> {
     let user = User::from_env()?;
+    let extra_groups = ExtraGroup::parse_list(&std::env::var(GROUPS_ENV).unwrap_or_default())?;
     let shell = default_shell()?;
     add_user(&user, &shell)?;
+    add_extra_groups(&user, &extra_groups)?;
     prepare_home(&user)?;
     give_mount_parents(&user)?;
 
+    become_user(&user, &extra_groups)?;
     let mut process = user_command(&user, &shell, command);
     debug!("exec {process:?} as {}", user.name);
     Err(anyhow!(process.exec())).context("starting the command")
@@ -40,6 +44,31 @@ fn add_user(user: &User, shell: &Path) -> anyhow::Result<()> {
         write(GROUP_FILE, &with_line(&group, &user.group_line()))?;
     }
     Ok(())
+}
+
+/// Gives each extra group's gid a name in the image, so `id` shows it.
+fn add_extra_groups(user: &User, groups: &[ExtraGroup]) -> anyhow::Result<()> {
+    for group in groups {
+        let group_file = read(GROUP_FILE)?;
+        if let Some(line) = group.line_to_add(&group_file, &user.name) {
+            write(GROUP_FILE, &with_line(&group_file, &line))?;
+        }
+    }
+    Ok(())
+}
+
+/// Joins the user's own and extra groups, then becomes the user. Done here
+/// rather than through `Command`: it drops every supplementary group when it
+/// switches user, and cannot set them on stable Rust. Order matters: groups
+/// and gid need root, so the uid goes last.
+fn become_user(user: &User, extra_groups: &[ExtraGroup]) -> anyhow::Result<()> {
+    let groups: Vec<Gid> = std::iter::once(user.gid)
+        .chain(extra_groups.iter().map(|group| group.gid))
+        .map(Gid::from_raw)
+        .collect();
+    setgroups(&groups).context("joining the user's groups")?;
+    setgid(Gid::from_raw(user.gid)).context("switching to the user's group")?;
+    setuid(Uid::from_raw(user.uid)).context("switching to the user")
 }
 
 /// The home may already exist: created as root by the engine to hold a mount
@@ -128,8 +157,6 @@ fn user_command(user: &User, shell: &Path, command: &[String]) -> Command {
     let mut process = Command::new(program);
     process
         .args(args)
-        .uid(user.uid)
-        .gid(user.gid)
         .env("USER", &user.name)
         .env("LOGNAME", &user.name)
         .env("SHELL", shell);

@@ -5,13 +5,6 @@ source "$(dirname "$0")/../assert.sh"
 mkdir -p "$HOME/repos/other"
 echo hello > "$HOME/repos/other/readme"
 
-# with_profile NAME COMMAND...: runs COMMAND in a container of this example's profile NAME.
-with_profile() {
-    local name=$1
-    shift
-    "$vz_bin" -c "$example_dir/vz.yml" --profile "$name" -- "$@"
-}
-
 expect_output "the root mounts ~/repos" "hello" inside cat "$HOME/repos/other/readme"
 expect_failure "read-only" inside touch "$HOME/repos/other/new"
 

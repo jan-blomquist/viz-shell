@@ -139,6 +139,50 @@ impl User {
     }
 }
 
+/// A group the user joins besides their own, such as the docker socket's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtraGroup {
+    pub name: String,
+    pub gid: u32,
+}
+
+impl ExtraGroup {
+    /// `name:gid`, comma-separated; empty for none.
+    pub fn parse_list(text: &str) -> anyhow::Result<Vec<Self>> {
+        text.split(',')
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                let (name, gid) = item
+                    .split_once(':')
+                    .with_context(|| format!("extra group `{item}` is not `name:gid`"))?;
+                let gid = gid
+                    .parse()
+                    .with_context(|| format!("extra group `{item}` has no numeric gid"))?;
+                Ok(Self {
+                    name: name.to_owned(),
+                    gid,
+                })
+            })
+            .collect()
+    }
+
+    /// The `/etc/group` line that gives the gid a name, with `user` as a
+    /// member: none if the image already has the gid. The host's name when
+    /// the image does not use it, `host-<name>` when it does.
+    pub fn line_to_add(&self, group_file: &str, user: &str) -> Option<String> {
+        if entries(group_file).any(|entry| entry.id == Some(self.gid)) {
+            return None;
+        }
+        let name_taken = entries(group_file).any(|entry| entry.name == self.name);
+        let name = if name_taken {
+            format!("host-{}", self.name)
+        } else {
+            self.name.clone()
+        };
+        Some(format!("{name}:x:{}:{user}", self.gid))
+    }
+}
+
 /// `text` with `line` appended on a line of its own.
 pub fn with_line(text: &str, line: &str) -> String {
     let separator = if text.is_empty() || text.ends_with('\n') {
@@ -286,6 +330,60 @@ mod tests {
         let error = sally().needs_group(&group).unwrap_err();
 
         assert!(error.to_string().contains("`ubuntu`"), "{error}");
+    }
+
+    #[test]
+    fn parse_list__forms() {
+        let docker = ExtraGroup {
+            name: "docker".to_owned(),
+            gid: 969,
+        };
+        let audio = ExtraGroup {
+            name: "audio".to_owned(),
+            gid: 29,
+        };
+
+        assert_eq!(ExtraGroup::parse_list("").unwrap(), vec![]);
+        assert_eq!(
+            ExtraGroup::parse_list("docker:969").unwrap(),
+            vec![docker.clone()]
+        );
+        assert_eq!(
+            ExtraGroup::parse_list("docker:969,audio:29").unwrap(),
+            vec![docker, audio]
+        );
+    }
+
+    #[test]
+    fn parse_list__malformed__is_refused_naming_the_item() {
+        for text in ["docker", "docker:x"] {
+            let error = ExtraGroup::parse_list(text).unwrap_err().to_string();
+
+            assert!(error.contains(&format!("`{text}`")), "{error}");
+        }
+    }
+
+    #[test]
+    fn line_to_add__image_groups() {
+        let docker = ExtraGroup {
+            name: "docker".to_owned(),
+            gid: 969,
+        };
+        let cases = [
+            (GROUP, Some("docker:x:969:sally")),
+            ("root:x:0:\nsomething:x:969:\n", None),
+            (
+                "root:x:0:\ndocker:x:101:\n",
+                Some("host-docker:x:969:sally"),
+            ),
+        ];
+        for (group_file, expected) in cases {
+            assert_eq!(
+                docker.line_to_add(group_file, "sally").as_deref(),
+                expected,
+                "group file: {group_file:?}"
+            );
+        }
     }
 
     #[test]

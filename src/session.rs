@@ -8,6 +8,7 @@ use docker_wrapper::RunCommand;
 
 use crate::constants::{CONTAINER_ROOT, ENTRYPOINT_PATH};
 use crate::mounts::HostMount;
+use crate::share::DockerSocket;
 use crate::state::StateMount;
 use crate::user::User;
 
@@ -20,6 +21,8 @@ pub struct Session<'a> {
     pub user: &'a User,
     pub state: &'a [StateMount],
     pub mounts: &'a [HostMount],
+    /// The host's docker socket, when `share.docker` is on.
+    pub docker: Option<&'a DockerSocket>,
     /// Host variables to copy in, already filtered to those that are set.
     pub passthrough: &'a [(String, String)],
     /// Empty for the shell.
@@ -50,13 +53,16 @@ impl Session<'_> {
         if self.tty {
             run = run.tty();
         }
-        let user_env = self
+        let docker_env = self.docker.map(DockerSocket::env).into_iter().flatten();
+        let env: Vec<(String, String)> = self
             .user
             .env()
-            .map(|(name, value)| (name.to_owned(), value));
-        user_env
-            .iter()
-            .chain(self.passthrough)
+            .into_iter()
+            .chain(docker_env)
+            .map(|(name, value)| (name.to_owned(), value))
+            .chain(self.passthrough.iter().cloned())
+            .collect();
+        env.iter()
             .fold(run, |run, (name, value)| run.env(name, value))
     }
 }
@@ -79,6 +85,10 @@ impl Session<'_> {
             self.mounts
                 .iter()
                 .map(|mount| Bind::new(&mount.path, &mount.path, mount.read_only)),
+        );
+        binds.extend(
+            self.docker
+                .map(|socket| Bind::new(&socket.path, &socket.path, false)),
         );
         binds.sort_by_key(|bind| bind.dst.components().count());
         binds
@@ -108,6 +118,24 @@ impl<'a> Bind<'a> {
             self.dst.display()
         )
     }
+}
+
+/// Inside a vz container, a nested vz asks the host's daemon to mount its
+/// own binary; that path must exist on the host too. Only a binary within
+/// the repository, mounted at the same path, is sure to.
+pub fn check_binary_reachable(
+    inside_vz: bool,
+    vz_binary: &Path,
+    repo_root: &Path,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !inside_vz || vz_binary.starts_with(repo_root),
+        "inside a vz container, run a vz built in the repository (such as \
+         target/x86_64-unknown-linux-musl/release/vz): the host's docker mounts \
+         {} from the host, where it does not exist",
+        vz_binary.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -144,6 +172,11 @@ mod tests {
             path: PathBuf::from("/home/sally/repos"),
             read_only: true,
         }];
+        let docker = DockerSocket {
+            path: PathBuf::from("/run/user/1000/docker.sock"),
+            group: "docker".to_owned(),
+            gid: 969,
+        };
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
         let session = Session {
             image: "vz-vz:abc",
@@ -153,6 +186,7 @@ mod tests {
             user: &user,
             state: &state,
             mounts: &mounts,
+            docker: Some(&docker),
             passthrough: &passthrough,
             command,
             tty,
@@ -236,6 +270,51 @@ mod tests {
         let args = args_for(&[], false);
 
         assert!(!args.contains(&"--tty".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn run_command__docker_shared__socket_at_its_path_with_host_and_group() {
+        let args = args_for(&[], true);
+
+        assert!(
+            has(
+                &args,
+                "--mount",
+                "type=bind,src=/run/user/1000/docker.sock,dst=/run/user/1000/docker.sock"
+            ),
+            "{args:?}"
+        );
+        assert!(
+            has(
+                &args,
+                "--env",
+                "DOCKER_HOST=unix:///run/user/1000/docker.sock"
+            ),
+            "{args:?}"
+        );
+        assert!(has(&args, "--env", "VZ_GROUPS=docker:969"), "{args:?}");
+    }
+
+    #[test]
+    fn check_binary_reachable__cases() {
+        let repo = Path::new("/home/sally/repos/vz");
+        let built = Path::new("/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/vz");
+        let cases = [
+            (false, Path::new("/run/vz/vz"), true),
+            (true, built, true),
+            (true, Path::new("/run/vz/vz"), false),
+            (true, Path::new("/usr/local/bin/vz"), false),
+        ];
+        for (inside_vz, binary, reachable) in cases {
+            let result = check_binary_reachable(inside_vz, binary, repo);
+
+            assert_eq!(
+                result.is_ok(),
+                reachable,
+                "{inside_vz} {}",
+                binary.display()
+            );
+        }
     }
 
     #[test]

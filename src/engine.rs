@@ -2,7 +2,9 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
 use anyhow::{Context, bail, ensure};
-use docker_wrapper::{DockerCommand, InspectCommand, PullCommand, RunCommand, ensure_docker};
+use docker_wrapper::{
+    DockerCommand, GenericCommand, InspectCommand, PullCommand, RunCommand, ensure_docker,
+};
 use tracing::{debug, info, instrument};
 
 use crate::build::BuildPlan;
@@ -39,6 +41,17 @@ impl Engine {
                 .unwrap_or_default()
         );
         Ok(Self(()))
+    }
+
+    /// The current endpoint, as `docker context inspect` reports it: it
+    /// follows `DOCKER_HOST` and `docker context use`.
+    pub async fn docker_endpoint(&self) -> anyhow::Result<String> {
+        let output = GenericCommand::new("context")
+            .args(["inspect", "--format", "{{.Endpoints.docker.Host}}"])
+            .execute()
+            .await
+            .context("asking docker for its endpoint")?;
+        Ok(output.stdout.trim().to_owned())
     }
 
     pub async fn has_image(&self, image: &str) -> bool {
