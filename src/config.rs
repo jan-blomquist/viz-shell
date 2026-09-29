@@ -1,6 +1,13 @@
 //! `vz.yml`: a root layer and named profiles, each a [`Layer`] of the same
 //! shape. [`RepoConfig::effective`] merges the root with a profile's chain
 //! and resolves the result into the [`EffectiveConfig`] vz runs with.
+//!
+//! Collections are lists of entries, each keyed by its path or name: a bare
+//! entry for the common case, the expanded form for anything else, and
+//! `enabled: false` to remove one. A later layer's entry with the same key
+//! updates the earlier one in its place; a new one comes last. Two maps:
+//! `env.defaults`, keyed by variable name, and `profiles`, keyed by profile
+//! name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,19 +17,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_TAG, HOME_PREFIX};
 
-/// The parsed `vz.yml`, checked: every path well formed, every `extends`
-/// naming a profile, no cycles.
+/// The parsed `vz.yml`, checked: every path well formed, every key once per
+/// list, every `extends` naming a profile, no cycles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoConfig {
     root: Layer,
 }
 
 /// One layer of configuration: the root of `vz.yml`, or a profile. Every
-/// field is optional; collections are maps keyed by what they are about, so
-/// a later layer changes or removes an entry by naming it.
+/// field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
+    /// Profiles only: the profile this one starts from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageSource>,
     /// Where state is kept: relative to the file's folder, `~/…` or
@@ -32,18 +41,63 @@ pub struct Layer {
     /// What of the host the shell shares.
     #[serde(default, skip_serializing_if = "Share::is_unset")]
     pub share: Share,
-    /// Keyed by container path.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub state: BTreeMap<String, StateValue>,
-    /// Keyed by host path, shown at the same path inside.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub mounts: BTreeMap<String, MountValue>,
-    /// Profiles only: the profile this one starts from.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extends: Option<String>,
-    /// Root only.
+    /// Environment variables inside the container.
+    #[serde(default, skip_serializing_if = "Env::is_unset")]
+    pub env: Env,
+    /// Container paths whose contents outlive the container.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<StateItem>,
+    /// Host paths shown at the same path inside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<MountItem>,
+    /// Root only, keyed by profile name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Layer>,
+}
+
+/// An entry of a list that later layers change by its key.
+trait Keyed: Clone {
+    /// The path or name that identifies the entry.
+    fn key(&self) -> &str;
+    fn enabled(&self) -> bool;
+}
+
+/// `over`'s entries on top of `base`'s: one with a key already there updates
+/// that entry in its place; a new one comes last.
+fn merge_keyed<T: Keyed>(base: &[T], over: &[T]) -> Vec<T> {
+    let mut merged = base.to_vec();
+    for entry in over {
+        match merged
+            .iter_mut()
+            .find(|earlier| earlier.key() == entry.key())
+        {
+            Some(earlier) => *earlier = entry.clone(),
+            None => merged.push(entry.clone()),
+        }
+    }
+    merged
+}
+
+/// Refuses a key listed twice in one list.
+fn check_unique<T: Keyed>(list: &[T], what: &str) -> anyhow::Result<()> {
+    for (index, entry) in list.iter().enumerate() {
+        ensure!(
+            !list[..index]
+                .iter()
+                .any(|earlier| earlier.key() == entry.key()),
+            "{what} `{}` is listed twice",
+            entry.key()
+        );
+    }
+    Ok(())
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// What of the host the shell may share: a fixed set, so a misspelt key is
@@ -65,6 +119,122 @@ impl Share {
         Share {
             docker: over.docker.or(self.docker),
         }
+    }
+}
+
+/// Environment variables, from three sources; later wins: `defaults`, then
+/// `files` in order, then `passthrough`. Values from files and the host are
+/// read on the host, never mounted, and never printed.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Env {
+    /// Values written here: the lowest level. Keyed by variable name;
+    /// `null` removes one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaults: BTreeMap<String, Option<EnvScalar>>,
+    /// `.env`-style files, read in order; optional unless `required: true`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileItem>,
+    /// Host variables copied in, by name or `*`/`?` glob.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passthrough: Vec<PassthroughItem>,
+}
+
+impl Env {
+    fn is_unset(&self) -> bool {
+        *self == Env::default()
+    }
+
+    fn merge(&self, over: &Env) -> Env {
+        let mut defaults = self.defaults.clone();
+        defaults.extend(over.defaults.clone());
+        Env {
+            defaults,
+            files: merge_keyed(&self.files, &over.files),
+            passthrough: merge_keyed(&self.passthrough, &over.passthrough),
+        }
+    }
+}
+
+/// A value as YAML writes it; it reaches the container as its text.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum EnvScalar {
+    Bool(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+}
+
+impl EnvScalar {
+    fn to_value(&self) -> String {
+        match self {
+            EnvScalar::Bool(value) => value.to_string(),
+            EnvScalar::Integer(value) => value.to_string(),
+            EnvScalar::Float(value) => value.to_string(),
+            EnvScalar::Text(value) => value.clone(),
+        }
+    }
+}
+
+/// An env file: a bare path, optional, or expanded.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FileItem {
+    Path(String),
+    Full(FileSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSpec {
+    pub path: String,
+    /// Refuse to start when the file is missing, rather than skip it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Keyed for FileItem {
+    fn key(&self) -> &str {
+        match self {
+            FileItem::Path(path) => path,
+            FileItem::Full(spec) => &spec.path,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, FileItem::Full(spec) if !spec.enabled)
+    }
+}
+
+/// A passthrough: a bare name or glob, or expanded.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PassthroughItem {
+    Name(String),
+    Full(PassthroughSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassthroughSpec {
+    pub name: String,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Keyed for PassthroughItem {
+    fn key(&self) -> &str {
+        match self {
+            PassthroughItem::Name(name) => name,
+            PassthroughItem::Full(spec) => &spec.name,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, PassthroughItem::Full(spec) if !spec.enabled)
     }
 }
 
@@ -91,23 +261,25 @@ fn default_build_context() -> PathBuf {
     PathBuf::from(DEFAULT_BUILD_CONTEXT)
 }
 
-/// A state entry as written: `true` or `false`, `dir` or `file`, or in full.
+/// A state entry: a bare path, a folder, or expanded.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum StateValue {
-    Enabled(bool),
-    Kind(StateKind),
+pub enum StateItem {
+    Path(String),
     Full(StateSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateSpec {
-    #[serde(rename = "type", default)]
+    pub path: String,
+    #[serde(rename = "type", default, skip_serializing_if = "StateKind::is_dir")]
     pub kind: StateKind,
     /// A file's content when vz creates it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub init: Option<String>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -118,12 +290,41 @@ pub enum StateKind {
     File,
 }
 
-/// A mount as written: `true` (read-only) or `false`, `ro` or `rw`.
+impl StateKind {
+    fn is_dir(&self) -> bool {
+        *self == StateKind::Dir
+    }
+}
+
+impl Keyed for StateItem {
+    fn key(&self) -> &str {
+        match self {
+            StateItem::Path(path) => path,
+            StateItem::Full(spec) => &spec.path,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, StateItem::Full(spec) if !spec.enabled)
+    }
+}
+
+/// A mount: a bare path, read-only, or expanded.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum MountValue {
-    Enabled(bool),
-    Mode(MountMode),
+pub enum MountItem {
+    Path(String),
+    Full(MountSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MountSpec {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "MountMode::is_ro")]
+    pub mode: MountMode,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
@@ -134,13 +335,33 @@ pub enum MountMode {
     Rw,
 }
 
-/// The configuration vz runs with: every layer applied, `false` entries gone,
+impl MountMode {
+    fn is_ro(&self) -> bool {
+        *self == MountMode::Ro
+    }
+}
+
+impl Keyed for MountItem {
+    fn key(&self) -> &str {
+        match self {
+            MountItem::Path(path) => path,
+            MountItem::Full(spec) => &spec.path,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, MountItem::Full(spec) if !spec.enabled)
+    }
+}
+
+/// The configuration vz runs with: every layer applied, removed entries gone,
 /// shorthands spelled out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveConfig {
     pub image: ImageSource,
     pub state_dir: Option<String>,
     pub share: Shared,
+    pub env: EffectiveEnv,
     pub state: Vec<StateEntry>,
     pub mounts: Vec<MountEntry>,
 }
@@ -149,6 +370,24 @@ pub struct EffectiveConfig {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Shared {
     pub docker: bool,
+}
+
+/// The environment's sources, settled: no removed entries, values as text.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EffectiveEnv {
+    /// By name.
+    pub defaults: Vec<(String, String)>,
+    /// In order.
+    pub files: Vec<EnvFile>,
+    /// Names and globs, in order.
+    pub passthrough: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnvFile {
+    /// As written: relative to the `vz.yml`'s folder, `~/…` or absolute.
+    pub path: String,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -246,37 +485,69 @@ impl Layer {
     /// `over` on top of `self`: its fields where set, its entries per key.
     /// The result is a plain layer: no `extends`, no profiles.
     fn merge(self, over: &Layer) -> Layer {
-        let mut state = self.state;
-        state.extend(over.state.clone());
-        let mut mounts = self.mounts;
-        mounts.extend(over.mounts.clone());
         Layer {
+            extends: None,
             image: over.image.clone().or(self.image),
             state_dir: over.state_dir.clone().or(self.state_dir),
             share: self.share.merge(&over.share),
-            state,
-            mounts,
-            extends: None,
+            env: self.env.merge(&over.env),
+            state: merge_keyed(&self.state, &over.state),
+            mounts: merge_keyed(&self.mounts, &over.mounts),
             profiles: BTreeMap::new(),
         }
     }
 
-    /// Paths are well formed, and `init` is given only to a file.
+    /// Paths and names are well formed, each once per list, and `init` is
+    /// given only to a file.
     fn check_entries(&self) -> anyhow::Result<()> {
-        for (path, value) in &self.state {
-            check_path("state", path)?;
-            if let StateValue::Full(spec) = value {
+        check_unique(&self.state, "state path")?;
+        for entry in &self.state {
+            check_path("state", entry.key())?;
+            if let StateItem::Full(spec) = entry {
                 ensure!(
                     spec.init.is_none() || spec.kind == StateKind::File,
-                    "state path `{path}` has `init`, which only a `type: file` takes"
+                    "state path `{}` has `init`, which only a `type: file` takes",
+                    spec.path
                 );
             }
         }
-        for path in self.mounts.keys() {
-            check_path("mount", path)?;
+        check_unique(&self.mounts, "mount")?;
+        for entry in &self.mounts {
+            check_path("mount", entry.key())?;
+        }
+        for name in self.env.defaults.keys() {
+            ensure!(
+                is_env_name(name),
+                "env default `{name}` is not a variable name: letters, digits and `_`, \
+                 not starting with a digit"
+            );
+        }
+        check_unique(&self.env.passthrough, "env passthrough")?;
+        for entry in &self.env.passthrough {
+            let pattern = entry.key();
+            ensure!(
+                !pattern.is_empty()
+                    && pattern
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '*' | '?')),
+                "env passthrough `{pattern}` is not a variable name or a `*`/`?` glob"
+            );
+        }
+        check_unique(&self.env.files, "env file")?;
+        for entry in &self.env.files {
+            ensure!(!entry.key().is_empty(), "env file path is empty");
         }
         Ok(())
     }
+}
+
+/// Letters, digits and `_`, not starting with a digit.
+pub fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl EffectiveConfig {
@@ -286,27 +557,31 @@ impl EffectiveConfig {
             .context("no image: set `image:` in vz.yml, or in the profile")?;
         let state = layer
             .state
-            .into_iter()
-            .filter_map(|(path, value)| {
-                let (kind, init) = match value {
-                    StateValue::Enabled(false) => return None,
-                    StateValue::Enabled(true) => (StateKind::Dir, None),
-                    StateValue::Kind(kind) => (kind, None),
-                    StateValue::Full(spec) => (spec.kind, spec.init),
-                };
-                Some(StateEntry { path, kind, init })
+            .iter()
+            .filter(|entry| entry.enabled())
+            .map(|entry| match entry {
+                StateItem::Path(path) => StateEntry {
+                    path: path.clone(),
+                    kind: StateKind::Dir,
+                    init: None,
+                },
+                StateItem::Full(spec) => StateEntry {
+                    path: spec.path.clone(),
+                    kind: spec.kind,
+                    init: spec.init.clone(),
+                },
             })
             .collect();
         let mounts = layer
             .mounts
-            .into_iter()
-            .filter_map(|(path, value)| {
-                let mode = match value {
-                    MountValue::Enabled(false) => return None,
-                    MountValue::Enabled(true) => MountMode::Ro,
-                    MountValue::Mode(mode) => mode,
-                };
-                Some(MountEntry { path, mode })
+            .iter()
+            .filter(|entry| entry.enabled())
+            .map(|entry| MountEntry {
+                path: entry.key().to_owned(),
+                mode: match entry {
+                    MountItem::Path(_) => MountMode::Ro,
+                    MountItem::Full(spec) => spec.mode,
+                },
             })
             .collect();
         Ok(Self {
@@ -315,15 +590,73 @@ impl EffectiveConfig {
             share: Shared {
                 docker: layer.share.docker.unwrap_or(false),
             },
+            env: EffectiveEnv::resolve(layer.env),
             state,
             mounts,
         })
     }
 }
 
+impl EffectiveEnv {
+    fn resolve(env: Env) -> Self {
+        let defaults = env
+            .defaults
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value?.to_value())))
+            .collect();
+        let files = env
+            .files
+            .iter()
+            .filter(|entry| entry.enabled())
+            .map(|entry| EnvFile {
+                path: entry.key().to_owned(),
+                required: matches!(entry, FileItem::Full(spec) if spec.required),
+            })
+            .collect();
+        let passthrough = env
+            .passthrough
+            .iter()
+            .filter(|entry| entry.enabled())
+            .map(|entry| entry.key().to_owned())
+            .collect();
+        Self {
+            defaults,
+            files,
+            passthrough,
+        }
+    }
+
+    fn to_env(&self) -> Env {
+        Env {
+            defaults: self
+                .defaults
+                .iter()
+                .map(|(name, value)| (name.clone(), Some(EnvScalar::Text(value.clone()))))
+                .collect(),
+            files: self
+                .files
+                .iter()
+                .map(|file| match file.required {
+                    true => FileItem::Full(FileSpec {
+                        path: file.path.clone(),
+                        required: true,
+                        enabled: true,
+                    }),
+                    false => FileItem::Path(file.path.clone()),
+                })
+                .collect(),
+            passthrough: self
+                .passthrough
+                .iter()
+                .map(|name| PassthroughItem::Name(name.clone()))
+                .collect(),
+        }
+    }
+}
+
 impl EffectiveConfig {
-    /// As a `vz.yml` without profiles: every shorthand spelled out, so it
-    /// parses back to the same configuration.
+    /// As a `vz.yml` without profiles: every entry in its shortest form that
+    /// says the same, so it parses back to the same configuration.
     pub fn to_yaml(&self) -> anyhow::Result<String> {
         serde_saphyr::to_string(&self.to_layer()).context("writing the effective configuration")
     }
@@ -332,21 +665,27 @@ impl EffectiveConfig {
         let state = self
             .state
             .iter()
-            .map(|entry| {
-                let value = match &entry.init {
-                    None => StateValue::Kind(entry.kind),
-                    Some(init) => StateValue::Full(StateSpec {
-                        kind: entry.kind,
-                        init: Some(init.clone()),
-                    }),
-                };
-                (entry.path.clone(), value)
+            .map(|entry| match (entry.kind, &entry.init) {
+                (StateKind::Dir, None) => StateItem::Path(entry.path.clone()),
+                (kind, init) => StateItem::Full(StateSpec {
+                    path: entry.path.clone(),
+                    kind,
+                    init: init.clone(),
+                    enabled: true,
+                }),
             })
             .collect();
         let mounts = self
             .mounts
             .iter()
-            .map(|entry| (entry.path.clone(), MountValue::Mode(entry.mode)))
+            .map(|entry| match entry.mode {
+                MountMode::Ro => MountItem::Path(entry.path.clone()),
+                mode => MountItem::Full(MountSpec {
+                    path: entry.path.clone(),
+                    mode,
+                    enabled: true,
+                }),
+            })
             .collect();
         Layer {
             image: Some(self.image.clone()),
@@ -354,6 +693,7 @@ impl EffectiveConfig {
             share: Share {
                 docker: self.share.docker.then_some(true),
             },
+            env: self.env.to_env(),
             state,
             mounts,
             ..Layer::default()
@@ -437,25 +777,25 @@ mod tests {
     const BASE: &str = "\
 image: debian
 mounts:
-  ~/repos: ro
-  ~/.gitconfig: ro
+  - ~/repos
+  - ~/.gitconfig
 state:
-  ~/.cache: dir
+  - ~/.cache
 profiles:
   writable:
     mounts:
-      ~/repos: rw
+      - { path: ~/repos, mode: rw }
   bare:
     mounts:
-      ~/repos: false
-      ~/.gitconfig: false
+      - { path: ~/repos, enabled: false }
+      - { path: ~/.gitconfig, enabled: false }
     state:
-      ~/.cache: false
+      - { path: ~/.cache, enabled: false }
   bare-alpine:
     extends: bare
     image: alpine
     state:
-      ~/scratch: dir
+      - ~/scratch
 ";
 
     #[test]
@@ -481,33 +821,40 @@ profiles:
     }
 
     #[test]
-    fn effective__state_value_forms__spelled_out_and_false_dropped() {
+    fn effective__state_forms__spelled_out_in_order_disabled_dropped() {
         let text = "\
 image: debian
 state:
-  ~/.a: true
-  ~/.b: dir
-  ~/.c.json: file
-  ~/.d.json: { type: file, init: \"{}\" }
-  /opt/data: { type: dir }
-  ~/.gone: false
+  - ~/.b
+  - ~/.a
+  - { path: ~/.c.json, type: file }
+  - { path: ~/.d.json, type: file, init: \"{}\" }
+  - { path: /opt/data, type: dir }
+  - { path: ~/.gone, enabled: false }
 ";
 
         let config = effective(text, None);
 
         let expected = vec![
-            state("/opt/data", StateKind::Dir, None),
-            state("~/.a", StateKind::Dir, None),
             state("~/.b", StateKind::Dir, None),
+            state("~/.a", StateKind::Dir, None),
             state("~/.c.json", StateKind::File, None),
             state("~/.d.json", StateKind::File, Some("{}")),
+            state("/opt/data", StateKind::Dir, None),
         ];
         assert_eq!(config.state, expected);
     }
 
     #[test]
-    fn effective__mount_value_forms__true_is_read_only_and_false_dropped() {
-        let text = "image: debian\nmounts:\n  ~/a: true\n  ~/b: ro\n  ~/c: rw\n  ~/d: false\n";
+    fn effective__mount_forms__bare_is_read_only_disabled_dropped() {
+        let text = "\
+image: debian
+mounts:
+  - ~/a
+  - { path: ~/b, mode: ro }
+  - { path: ~/c, mode: rw }
+  - { path: ~/d, enabled: false }
+";
 
         let config = effective(text, None);
 
@@ -524,25 +871,25 @@ state:
         let config = effective(BASE, None);
 
         let expected = vec![
-            mount("~/.gitconfig", MountMode::Ro),
             mount("~/repos", MountMode::Ro),
+            mount("~/.gitconfig", MountMode::Ro),
         ];
         assert_eq!(config.mounts, expected);
     }
 
     #[test]
-    fn effective__profile_setting_a_key__overrides_the_root_entry() {
+    fn effective__profile_entry_with_the_same_path__updates_it_in_place() {
         let config = effective(BASE, Some("writable"));
 
         let expected = vec![
-            mount("~/.gitconfig", MountMode::Ro),
             mount("~/repos", MountMode::Rw),
+            mount("~/.gitconfig", MountMode::Ro),
         ];
         assert_eq!(config.mounts, expected);
     }
 
     #[test]
-    fn effective__profile_setting_false__removes_the_root_entry() {
+    fn effective__profile_entry_disabled__removes_the_root_entry() {
         let config = effective(BASE, Some("bare"));
 
         assert_eq!((config.mounts, config.state), (vec![], vec![]));
@@ -556,32 +903,11 @@ state:
             image: ImageSource::Reference("alpine".to_owned()),
             state_dir: None,
             share: Shared::default(),
+            env: EffectiveEnv::default(),
             state: vec![state("~/scratch", StateKind::Dir, None)],
             mounts: vec![],
         };
         assert_eq!(config, expected);
-    }
-
-    #[test]
-    fn to_yaml__effective_configuration__parses_back_to_itself() {
-        let text = format!("{BASE}share:\n  docker: true\n");
-        let config = effective(&text, Some("writable"));
-
-        let yaml = config.to_yaml().unwrap();
-
-        assert_eq!(effective(&yaml, None), config, "{yaml}");
-    }
-
-    #[test]
-    fn to_yaml__shorthands__are_spelled_out() {
-        let text = "image: debian\nstate:\n  ~/.a: true\nmounts:\n  ~/b: true\n";
-
-        let yaml = effective(text, None).to_yaml().unwrap();
-
-        assert!(
-            yaml.contains("~/.a: dir") && yaml.contains("~/b: ro"),
-            "{yaml}"
-        );
     }
 
     #[test]
@@ -619,6 +945,122 @@ profiles:
         assert!(error(text).contains("dcoker"), "{}", error(text));
     }
 
+    const ENV: &str = "\
+image: debian
+env:
+  defaults:
+    RUST_LOG: info
+    PORT: 8080
+    DEBUG: false
+    GONE: x
+  files:
+    - .env
+    - ~/.secrets/a.env
+    - { path: .env.old, required: true }
+  passthrough:
+    - GH_TOKEN
+    - \"FMP_*\"
+profiles:
+  ci:
+    env:
+      defaults:
+        RUST_LOG: debug
+        GONE: null
+      files:
+        - { path: .env, required: true }
+        - { path: .env.old, enabled: false }
+        - .env.ci
+      passthrough:
+        - { name: GH_TOKEN, enabled: false }
+        - CI_*
+";
+
+    fn defaults(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn file(path: &str, required: bool) -> EnvFile {
+        EnvFile {
+            path: path.to_owned(),
+            required,
+        }
+    }
+
+    #[test]
+    fn effective__env_root__values_as_text_files_in_order() {
+        let env = effective(ENV, None).env;
+
+        let expected = EffectiveEnv {
+            defaults: defaults(&[
+                ("DEBUG", "false"),
+                ("GONE", "x"),
+                ("PORT", "8080"),
+                ("RUST_LOG", "info"),
+            ]),
+            files: vec![
+                file(".env", false),
+                file("~/.secrets/a.env", false),
+                file(".env.old", true),
+            ],
+            passthrough: vec!["GH_TOKEN".to_owned(), "FMP_*".to_owned()],
+        };
+        assert_eq!(env, expected);
+    }
+
+    #[test]
+    fn effective__env_profile__overrides_removes_and_appends() {
+        let env = effective(ENV, Some("ci")).env;
+
+        let expected = EffectiveEnv {
+            // RUST_LOG overridden, GONE removed by null.
+            defaults: defaults(&[("DEBUG", "false"), ("PORT", "8080"), ("RUST_LOG", "debug")]),
+            // .env made required in its place, .env.old removed, .env.ci appended.
+            files: vec![
+                file(".env", true),
+                file("~/.secrets/a.env", false),
+                file(".env.ci", false),
+            ],
+            // GH_TOKEN removed, CI_* appended.
+            passthrough: vec!["FMP_*".to_owned(), "CI_*".to_owned()],
+        };
+        assert_eq!(env, expected);
+    }
+
+    #[test]
+    fn parse__invalid_env_names__are_refused_naming_them() {
+        let cases = [
+            ("env:\n  defaults:\n    1ST: x\n", "`1ST`"),
+            ("env:\n  passthrough: [MY-VAR]\n", "`MY-VAR`"),
+            ("env:\n  set:\n    A: x\n", "set"),
+        ];
+        for (text, expected) in cases {
+            let message = error(&format!("image: debian\n{text}"));
+
+            assert!(message.contains(expected), "expected {expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn parse__same_key_twice_in_one_list__is_refused_naming_it() {
+        let cases = [
+            ("mounts: [~/a, { path: ~/a, mode: rw }]", "mount `~/a`"),
+            ("state: [~/a, ~/a]", "state path `~/a`"),
+            ("env:\n  files: [.env, .env]", "env file `.env`"),
+            ("env:\n  passthrough: [A, A]", "env passthrough `A`"),
+        ];
+        for (text, expected) in cases {
+            let message = error(&format!("image: debian\n{text}\n"));
+
+            assert!(
+                message.contains(expected) && message.contains("twice"),
+                "expected {expected}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn effective__unknown_profile__is_refused_naming_the_defined_ones() {
         let config = RepoConfig::parse(BASE).unwrap();
@@ -633,7 +1075,7 @@ profiles:
 
     #[test]
     fn effective__no_image_anywhere__is_refused() {
-        let config = RepoConfig::parse("mounts:\n  ~/repos: ro\n").unwrap();
+        let config = RepoConfig::parse("mounts: [~/repos]\n").unwrap();
 
         let error = config.effective(None).unwrap_err().to_string();
 
@@ -650,10 +1092,44 @@ profiles:
     }
 
     #[test]
+    fn to_yaml__effective_configuration__parses_back_to_itself() {
+        let cases = [
+            (format!("{BASE}share:\n  docker: true\n"), Some("writable")),
+            (ENV.to_owned(), Some("ci")),
+        ];
+        for (text, profile) in cases {
+            let config = effective(&text, profile);
+
+            let yaml = config.to_yaml().unwrap();
+
+            assert_eq!(effective(&yaml, None), config, "{yaml}");
+        }
+    }
+
+    #[test]
+    fn to_yaml__entries__in_their_shortest_form() {
+        let text = "\
+image: debian
+state:
+  - { path: ~/.a, type: dir }
+mounts:
+  - { path: ~/b, mode: ro }
+  - { path: ~/c, mode: rw }
+";
+
+        let yaml = effective(text, None).to_yaml().unwrap();
+
+        assert!(
+            yaml.contains("- ~/.a") && yaml.contains("- ~/b") && yaml.contains("mode: rw"),
+            "{yaml}"
+        );
+    }
+
+    #[test]
     fn parse__unknown_key__is_refused_naming_it() {
         let cases = [
             ("image: debian\nimgae: typo\n", "imgae"),
-            ("profiles:\n  ci:\n    mounst: {}\n", "mounst"),
+            ("profiles:\n  ci:\n    mounst: []\n", "mounst"),
         ];
         for (text, key) in cases {
             assert!(error(text).contains(key), "key: {key}: {}", error(text));
@@ -675,7 +1151,7 @@ profiles:
             "relative", "~", "~/", "/", "~/../x", "/a/./b", "~user/x", "/a//b", "~/x/",
         ];
         for path in paths {
-            let text = format!("image: debian\nstate:\n  \"{path}\": dir\n");
+            let text = format!("image: debian\nstate:\n  - \"{path}\"\n");
 
             let message = error(&text);
 
@@ -688,7 +1164,7 @@ profiles:
 
     #[test]
     fn parse__invalid_path_in_a_profile__is_refused_naming_the_profile() {
-        let text = "image: debian\nprofiles:\n  ci:\n    mounts:\n      relative: ro\n";
+        let text = "image: debian\nprofiles:\n  ci:\n    mounts: [relative]\n";
 
         let message = error(text);
 
@@ -700,14 +1176,14 @@ profiles:
 
     #[test]
     fn parse__init_on_a_folder__is_refused() {
-        let text = "image: debian\nstate:\n  ~/.x: { init: x }\n";
+        let text = "image: debian\nstate:\n  - { path: ~/.x, init: x }\n";
 
         assert!(error(text).contains("init"), "{}", error(text));
     }
 
     #[test]
     fn parse__unknown_mount_mode__is_refused() {
-        let text = "image: debian\nmounts:\n  ~/.config/gh: wr\n";
+        let text = "image: debian\nmounts:\n  - { path: ~/.config/gh, mode: wr }\n";
 
         let result = RepoConfig::parse(text);
 

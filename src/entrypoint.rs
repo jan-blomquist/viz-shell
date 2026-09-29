@@ -183,7 +183,51 @@ fn write(path: &str, text: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 #[allow(non_snake_case)] // unit__scenario__expected test names
 mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+
     use super::*;
+
+    fn sally() -> User {
+        User {
+            name: "sally".to_owned(),
+            uid: 1000,
+            gid: 1000,
+            group: "sally".to_owned(),
+            home: PathBuf::from("/home/sally"),
+        }
+    }
+
+    #[test]
+    fn user_command__no_command__runs_the_shell() {
+        let process = user_command(&sally(), Path::new("/bin/bash"), &[]);
+
+        assert_eq!(process.get_program(), "/bin/bash");
+        assert_eq!(process.get_args().count(), 0);
+    }
+
+    #[test]
+    fn user_command__command_given__runs_it_with_its_args() {
+        let command = ["cargo".to_owned(), "test".to_owned()];
+
+        let process = user_command(&sally(), Path::new("/bin/bash"), &command);
+
+        assert_eq!(process.get_program(), "cargo");
+        assert_eq!(process.get_args().collect::<Vec<_>>(), [OsStr::new("test")]);
+    }
+
+    #[test]
+    fn user_command__any__names_the_user_and_shell() {
+        let process = user_command(&sally(), Path::new("/bin/sh"), &[]);
+
+        let env: BTreeMap<&OsStr, Option<&OsStr>> = process.get_envs().collect();
+        let expected = BTreeMap::from([
+            (OsStr::new("LOGNAME"), Some(OsStr::new("sally"))),
+            (OsStr::new("SHELL"), Some(OsStr::new("/bin/sh"))),
+            (OsStr::new("USER"), Some(OsStr::new("sally"))),
+        ]);
+        assert_eq!(env, expected);
+    }
 
     #[test]
     fn mount_points__mountinfo_lines__fifth_field_unescaped() {

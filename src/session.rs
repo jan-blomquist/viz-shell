@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use docker_wrapper::RunCommand;
+use docker_wrapper::{DockerCommand, RunCommand};
 
 use crate::constants::{CONTAINER_ROOT, ENTRYPOINT_PATH};
 use crate::mounts::HostMount;
@@ -25,6 +25,9 @@ pub struct Session<'a> {
     pub docker: Option<&'a DockerSocket>,
     /// Host variables to copy in, already filtered to those that are set.
     pub passthrough: &'a [(String, String)],
+    /// The configured environment's names: passed as `--env NAME`, their
+    /// values only in the docker CLI's own environment.
+    pub env_names: &'a [String],
     /// Empty for the shell.
     pub command: &'a [String],
     /// Whether stdin and stdout are a terminal.
@@ -32,7 +35,20 @@ pub struct Session<'a> {
 }
 
 impl Session<'_> {
-    pub fn run_command(&self) -> RunCommand {
+    /// `docker run`'s arguments. docker-wrapper writes every `--env` as
+    /// `NAME=VALUE`; the configured environment goes in as bare names, right
+    /// after `run`, so values never reach a command line or a log.
+    pub fn run_args(&self) -> Vec<String> {
+        let mut args = self.run_command().build_command_args();
+        let names = self
+            .env_names
+            .iter()
+            .flat_map(|name| ["--env".to_owned(), name.clone()]);
+        args.splice(1..1, names);
+        args
+    }
+
+    fn run_command(&self) -> RunCommand {
         let entrypoint_args = ["entrypoint", "--"]
             .into_iter()
             .map(str::to_owned)
@@ -143,9 +159,10 @@ pub fn check_binary_reachable(
 mod tests {
     use std::path::PathBuf;
 
-    use docker_wrapper::DockerCommand;
+    use clap::Parser;
 
     use super::*;
+    use crate::cli::{Cli, Internal};
     use crate::config::StateKind;
 
     fn sally() -> User {
@@ -178,6 +195,7 @@ mod tests {
             gid: 969,
         };
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
+        let env_names = ["GH_TOKEN".to_owned()];
         let session = Session {
             image: "vz-vz:abc",
             repo_root: Path::new("/home/sally/repos/vz"),
@@ -188,10 +206,11 @@ mod tests {
             mounts: &mounts,
             docker: Some(&docker),
             passthrough: &passthrough,
+            env_names: &env_names,
             command,
             tty,
         };
-        session.run_command().build_command_args()
+        session.run_args()
     }
 
     fn has(args: &[String], flag: &str, value: &str) -> bool {
@@ -263,6 +282,40 @@ mod tests {
 
         let tail = &args[args.len() - 5..];
         assert_eq!(tail, ["vz-vz:abc", "entrypoint", "--", "id", "-u"]);
+    }
+
+    /// The launcher writes the entrypoint's arguments; the cli in the
+    /// container reads them. Both sides must agree, flags and `--` included.
+    #[test]
+    fn run_command__entrypoint_args__parse_back_to_the_same_command() {
+        let cases: [&[&str]; 3] = [&[], &["id", "-u"], &["cargo", "test", "--", "--nocapture"]];
+        for command in cases {
+            let command: Vec<String> = command.iter().map(|arg| arg.to_string()).collect();
+            let args = args_for(&command, false);
+            let after_image = args.iter().position(|arg| arg == "vz-vz:abc").unwrap() + 1;
+
+            let cli = Cli::try_parse_from(
+                std::iter::once("vz".to_owned()).chain(args[after_image..].iter().cloned()),
+            )
+            .unwrap();
+
+            let expected = Internal::Entrypoint {
+                command: command.clone(),
+            };
+            assert_eq!(cli.internal, Some(expected), "command: {command:?}");
+        }
+    }
+
+    #[test]
+    fn run_args__configured_env__by_name_only() {
+        let args = args_for(&[], false);
+
+        assert!(has(&args, "--env", "GH_TOKEN"), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("GH_TOKEN=")),
+            "{args:?}"
+        );
+        assert_eq!(&args[..3], ["run", "--env", "GH_TOKEN"]);
     }
 
     #[test]

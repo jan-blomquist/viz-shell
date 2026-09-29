@@ -1,0 +1,28 @@
+# The environment inside, from four sources; later wins:
+# env.defaults, then env.files in order, then env.passthrough, then vz --env.
+image: debian:stable-slim
+
+env:
+  defaults:                       # written here: the lowest level
+    LEVEL: default
+    GREETING: hello
+    REPO_ROOT: ${repo}            # ${repo} and ${home} are substituted
+  files:                          # read on the host, in this order; never mounted
+    - { path: ~/example.env, required: true }   # the test writes these files into its
+    - ~/local.env                               #   throwaway home: no tracked file holds a value;
+                                                #   a bare path is skipped when missing
+  passthrough:                    # copied from the host's environment
+    - LEVEL
+    - VZ_EXAMPLE_TOKEN
+    - "VZ_EXAMPLE_GLOB_*"
+
+profiles:
+  ci:
+    env:
+      defaults:
+        GREETING: null            # removed
+      files:
+        - ~/ci.env                # after the root's files
+      passthrough:
+        - { name: VZ_EXAMPLE_TOKEN, enabled: false }   # removed
+        - VZ_EXAMPLE_CI           # added

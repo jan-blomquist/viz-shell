@@ -2,11 +2,11 @@
 # the host's own files; each must exist on the host.
 image: debian:stable-slim
 
-mounts:                                 # keyed by host path: ro | rw | true (ro) | false
-  # Every repository, read-only, for reading and grepping.
-  # The repository vz runs for stays read-write inside it.
-  ~/repos: ro
+mounts:
+  # Every repository, read-only: the bare form. The repository vz runs for
+  # stays read-write inside it.
+  - ~/repos
   # The gh CLI's login, shared with the host, read-write.
-  ~/.config/gh: rw
-  # Your git identity, read-only.
-  ~/.gitconfig: ro
+  - { path: ~/.config/gh, mode: rw }
+  # Your git identity: a single file, read-only.
+  - ~/.gitconfig

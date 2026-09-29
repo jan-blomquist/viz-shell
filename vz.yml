@@ -3,20 +3,33 @@ image:
 
 state:
   # Crate downloads: the image keeps CARGO_HOME at /usr/local/cargo.
-  /usr/local/cargo/registry: dir
+  - /usr/local/cargo/registry
   # OpenCode's data folder, and its config file, which must start as valid JSON.
-  ~/.local/share/opencode: dir
-  ~/.config/opencode/opencode.json: { type: file, init: "{}" }
+  - ~/.local/share/opencode
+  - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }
 
 mounts:
   # All repositories, read-only. This one stays read-write: the repository's
   # own mount is deeper and lands on top.
-  ~/repos: ro
+  - ~/repos
   # ssh as on the host: keys, config and known hosts, read-only. The keys are
   # readable by everything inside the container.
-  ~/.ssh: ro
+  - ~/.ssh
 
 share:
   # The host's docker daemon: `vz -- just examples` runs the example tests
   # from inside vz.
   docker: true
+
+env:
+  defaults:
+    RUST_LOG: info
+    CARGO_TERM_COLOR: always
+    REPO_ROOT: ${repo}
+  files:
+    # Host-wide variables, read on the host; skipped where the file is missing.
+    - ~/.config/viz-shell/environment
+    # This repository's own, never committed (.gitignore); skipped when missing.
+    - .env
+  passthrough:
+    - GH_TOKEN

@@ -13,6 +13,7 @@ Linux first, shell first, no editor required
 - [State](#state)
 - [Mounts](#mounts)
 - [Share](#share)
+- [Environment](#environment)
 - [Profiles](#profiles)
 - [Examples](#examples)
 - [Logging](#logging)
@@ -108,11 +109,11 @@ Container paths whose contents survive the container. Each is kept in the state 
 at the git root by default, at its own container path and mounted back; the host's own files are untouched.
 
 ```yaml
-state_dir: .vz_state                                     # optional: the state folder, see below
-state:                                                   # keyed by container path
-  ~/.local/share/opencode: dir                           # a folder; `true` means the same
-  /var/cache/apt: dir                                    # any absolute path
-  ~/.config/opencode/opencode.json: { type: file, init: "{}" }  # a file, "{}" the first time
+state_dir: .vz_state                   # optional: the state folder, see below
+state:
+  - ~/.local/share/opencode            # a folder
+  - /var/cache/apt                     # any absolute path
+  - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }   # a file, "{}" the first time
 ```
 
 | Entry | Inside | Kept at |
@@ -120,8 +121,8 @@ state:                                                   # keyed by container pa
 | `~/.local/share/opencode` | `/home/sally/.local/share/opencode` | `.vz_state/home/sally/.local/share/opencode` |
 | `/var/cache/apt` | `/var/cache/apt` | `.vz_state/var/cache/apt` |
 
-- Values: `dir` or `true`, `file`, `{ type, init }`, or `false` (none: for profiles).
-  `init` is a file's content when `vz` creates it; never rewritten.
+- Expanded: `{ path, type: dir | file, init, enabled }`. `init` is a file's content when `vz`
+  creates it; never rewritten.
 - `state_dir`: relative to the `vz.yml`'s folder, `~/…` or absolute. Without it every configuration,
   `-c` ones included, shares `.vz_state/` at the git root.
 - `vz` creates missing entries as you. Delete the state folder to start over; ignoring it in git is up to you,
@@ -136,15 +137,18 @@ state:                                                   # keyed by container pa
 Host paths shown at the same path inside, reusing the host's own files.
 
 ```yaml
-mounts:                # keyed by host path
-  ~/repos: ro          # read-only; `true` means the same
-  ~/.config/gh: rw     # read-write
+mounts:
+  - ~/repos                              # read-only
+  - { path: ~/.config/gh, mode: rw }     # read-write
 ```
 
 - The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
   deeper mounts land on top.
 - A mount must exist on the host; `vz` never creates one.
-- `~/.ssh: ro` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
+- A single file mounts too, with two catches: a read-write one breaks tools that save by renaming
+  over it ("Device or resource busy"), and a running container keeps seeing the old version when
+  the host replaces the file by renaming, as many editors and `git config` do. Folders have neither.
+- `- ~/.ssh` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
   then readable by everything in the container: mount it only where you trust what runs there.
 - Paths follow the state rules; a mount may not overlap a state path.
 
@@ -161,31 +165,69 @@ share:
   `docker context use`) is mounted at its own path, `DOCKER_HOST` points at it, and you join its
   group: docker works inside as you, without sudo. The image needs the docker CLI.
 - Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
-- `false` in a profile turns it off: `profiles: { offline: { share: { docker: false } } }`.
+- `false` in a profile turns it off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
   repository (`target/…/release/vz`); another is refused.
 
+## Environment
+
+Variables inside the container, from four sources; later wins:
+
+```yaml
+env:
+  defaults:                     # 1. written here: the lowest level
+    RUST_LOG: info
+    REPO_ROOT: ${repo}          #    ${repo} and ${home} are substituted
+  files:                        # 2. read on the host, in this order; never mounted
+    - .env                      #    skipped when missing
+    - { path: .env.required, required: true }   # must exist
+  passthrough:                  # 3. copied from the host's environment
+    - GH_TOKEN
+    - "FMP_*"                   #    `*` and `?` globs
+```
+
+```sh
+vz --env RUST_LOG=debug         # 4. over everything; `--env NAME` copies the host's
+vz --show-env                   # every name and where it comes from, never a value
+```
+
+- Paths are relative to the `vz.yml`'s folder, `~/…` or absolute. Files use `.env` syntax: `KEY=value`,
+  `#` comments, `export`, and quotes around values with spaces.
+- `defaults` is a map, keyed by variable name: a profile overrides per name, `null` removes one.
+  `files` and `passthrough` are lists: expanded forms `{ path, required, enabled }` and `{ name, enabled }`.
+- An env file tracked by git is refused: its values would be in the repository's history.
+- Values reach the container by name (`docker run --env NAME`), never on a command line or in a log;
+  `--show-effective-config` and `--show-env` never print a value from a file or the host.
+  `docker inspect` of the container still shows them, as for any container environment.
+- `vz` sets `HOME`, `VZ_*`, `TERM`, `COLORTERM`, `LANG` and, when docker is shared, `DOCKER_HOST` itself;
+  the environment cannot change those.
+
 ## Profiles
 
-Named layers on top of the root of `vz.yml`, each with the same keys. Choose one with
+Named layers on top of the root of `vz.yml`, keyed by name, each with the same keys. Choose one with
 `vz --profile NAME` or `VZ_PROFILE=NAME`; plain `vz` uses the root alone.
 
 ```yaml
 mounts:
-  ~/repos: ro
+  - ~/repos
 
 profiles:
   writable:
-    mounts: { ~/repos: rw }     # overrides the root's entry
+    mounts: [{ path: ~/repos, mode: rw }]       # the same path: updated in its place
   isolated:
-    mounts: { ~/repos: false }  # removes it
+    mounts: [{ path: ~/repos, enabled: false }] # removed
   scratch:
-    extends: isolated           # starts from isolated
-    state: { ~/scratch: dir }   # and adds its own
+    extends: isolated                           # starts from isolated
+    state: [~/scratch]                          # and adds its own
 ```
 
-- A later layer wins per field and per key: root, then the `extends` chain, then the profile.
-- `false` removes an entry; on the root it is simply nothing.
+Every collection is a list, merged the same way: root, then the `extends` chain, then the profile.
+
+- An entry is a bare path or name for the common case, or expanded for anything else.
+- An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
+  a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
+- Settings (`image`, `state_dir`, `share`) are replaced; `env.defaults` merges per variable name.
+- The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
 
@@ -203,10 +245,11 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file |
 | [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
+| [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight |
 
 ## Logging
 
-Stderr, filtered by `VZ_LOG` (default `warn,vz=info`):
+Stderr, filtered by `VZ_LOG` (default `warn,vz=info,docker_wrapper=error`):
 
 ```sh
 VZ_LOG=vz=debug vz    # each step, and every docker command in full
