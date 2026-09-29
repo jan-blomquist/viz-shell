@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # The development image for this repository: the Rust toolchain pinned in
 # rust-toolchain.toml, vz built from this checkout, and what `just examples`
-# needs to run inside vz: the docker CLI, git and just.
+# needs to run inside vz: the docker CLI, git, just, and ssh for git over ssh.
 
 FROM docker:29-cli AS docker-cli
 
@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM toolchain
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git just \
+ && apt-get install -y --no-install-recommends git just openssh-client \
  && rm -rf /var/lib/apt/lists/*
 # Static binaries: the CLI talks to the host's daemon through the shared socket.
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

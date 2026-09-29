@@ -144,6 +144,8 @@ mounts:                # keyed by host path
 - The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
   deeper mounts land on top.
 - A mount must exist on the host; `vz` never creates one.
+- `~/.ssh: ro` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
+  then readable by everything in the container: mount it only where you trust what runs there.
 - Paths follow the state rules; a mount may not overlap a state path.
 
 ## Share
