@@ -4,8 +4,6 @@ target
 .vz_state/
 # env files hold secrets: vz refuses a tracked one
 .env
-# the legacy viz-shell's cache
-.z_cache/
 .idea/
 
 architecture.md

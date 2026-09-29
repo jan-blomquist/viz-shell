@@ -43,5 +43,11 @@ logged_command() {
 expect_contains "docker gets the name" "--env VZ_EXAMPLE_TOKEN" logged_command
 expect_lacks "never the value" "secret-value" logged_command
 
+# TERM comes from the host; one the image cannot describe falls back.
+term_inside() { TERM=$1 inside sh -c 'echo $TERM'; }
+expect_output "a terminal the image knows is kept" "xterm" term_inside xterm
+expect_output "one it does not know, a newer terminal's, falls back" "xterm-256color" \
+    term_inside xterm-ghostty
+
 missing_required() { rm "$HOME/example.env"; inside true 2>&1; }
 expect_failure "a missing required: true file is refused" missing_required

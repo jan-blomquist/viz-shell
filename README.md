@@ -66,7 +66,7 @@ Releases, with a one-line install script, are on the way. Until then, build from
 
 ```sh
 git clone https://github.com/jan-blomquist/viz-shell && cd viz-shell
-just build && just install ""      # ~/.local/bin/viz-shell, and its alias vz
+just build && just install         # ~/.local/bin/viz-shell, and its alias vz
 ```
 
 In any git repository, name an image, then run `vz`:
@@ -148,7 +148,11 @@ with the shell's, or the command's, exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
-- `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set.
+- `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set. A `TERM` the image has no
+  description for, as slim images lack those of newer terminals like ghostty, kitty or wezterm,
+  becomes `xterm-256color`, so tmux, less and htop still work;
+- `VZ_CONTAINER` names the container, and `VZ_CONTAINER_PROFILE` its profile, when one: for prompts,
+  scripts and agents that want to know where they run.
 
 `banner: true` prints a banner above an interactive shell (never above `vz -- command`), in the
 manner of fastfetch: what the shell is about to be. Colored on a terminal, unless `NO_COLOR` is set.
@@ -334,23 +338,33 @@ state:
 
 ## Mounts
 
-Host paths shown at the same path inside, reusing the host's own files.
+Host paths shown inside, reusing the host's own files: at the same path, unless a `target` names
+another.
 
 ```yaml
 mounts:
-  - ~/repos                              # read-only
-  - { path: ~/.config/gh, mode: rw }     # read-write
+  - ~/repos                                                  # read-only
+  - { path: ~/.config/gh, mode: rw }                         # read-write
+  - { path: ~/repos/skills, target: ~/.agents/skills }       # elsewhere inside
+  - { path: ~/repos/skills, target: ~/.config/opencode/skills }   # one source, several targets
 ```
 
 - The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
-  deeper mounts land on top.
+  deeper mounts land on top. A mount that lands on the repository itself is skipped, so one repository
+  can be read-write for every session, its own included: `{ path: ~/repos/notes, mode: rw }`.
+  `VZ_LOG=viz_shell=debug` shows the skip.
 - A mount must exist on the host; `vz` never creates one.
 - A single file mounts too, with two catches: a read-write one breaks tools that save by renaming
   over it ("Device or resource busy"), and a running container keeps seeing the old version when
   the host replaces the file by renaming, as many editors and `git config` do. Folders have neither.
 - `- ~/.ssh` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
   then readable by everything in the container: mount it only where you trust what runs there.
-- Paths follow the state rules; a mount may not overlap a state path.
+- Mounts are keyed by `target`, where they land: a profile updates or removes one by its target,
+  and one source may land in several places.
+- A mount may land inside a state folder, such as a library inside a tool's persisted config: `vz`
+  creates its mount point in the state folder, as you. It may not hold a state path, sit on one, or
+  lie inside a state file.
+- Paths follow the state rules.
 
 ## Share
 
@@ -367,7 +381,8 @@ share:
   group: docker works inside as you, without sudo. The image needs the docker CLI.
 - Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
 - `host_network`: `--network host`, the host's network stack, its `localhost` and its ports. Without
-  it the shell still reaches the internet, through docker's own network, but not the host's `localhost`.
+  it the shell still reaches the internet, through docker's own network, and the host answers to
+  `host.docker.internal`, as in Docker Desktop, but not on its `localhost`.
   It gives no root, but the shell reaches every service the host does, and its ports can clash.
 - `false` in a profile turns either off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
@@ -385,9 +400,10 @@ privileges:
 - The secure floor, by default: every Linux capability dropped, `no-new-privileges` set. The
   container's root processes keep `CHOWN`, `SETUID`, `SETGID` and `KILL`: the entrypoint to set you
   up, the init to pass signals on to your processes. Once the entrypoint becomes you, the shell holds
-  no capabilities, and setuid programs such as `sudo` or `su` gain nothing.
-- `sudo: true`: docker's default capabilities, no `no-new-privileges`, and a password-less sudoers
-  line for you. An image without sudo gets a warning, and the shell starts without it.
+  no capabilities, and setuid programs such as `sudo` or `su` gain nothing. At most 512 processes
+  run, so a runaway or a fork bomb stops there, not at the host's limit.
+- `sudo: true`: docker's default capabilities, no `no-new-privileges`, no process limit of its own,
+  and a password-less sudoers line for you. An image without sudo gets a warning, and the shell starts without it.
 - The global template grants it in its `trusted` profile; `false` in a profile takes it back.
 
 ## Environment
@@ -495,15 +511,15 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`build-dockerfile`](examples/build-dockerfile) | building from a Dockerfile, with args |
 | [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
 | [`state`](examples/state) | folders, a file with `init`, absolute paths |
-| [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file |
+| [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file, one source at several targets, a mount inside state, a mount on the repository skipped |
 | [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
-| [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight |
+| [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight, the `TERM` fallback |
 | [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
-| [`privileges`](examples/privileges) | the secure floor by default; sudo in a profile; an image without sudo |
-| [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default |
+| [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in a profile; an image without sudo |
+| [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |
-| [`sessions`](examples/sessions) | named containers, persistent ones, attach by index, name or `attach: true`, kill |
+| [`sessions`](examples/sessions) | named containers, `VZ_CONTAINER`, persistent ones, attach by index, name or `attach: true`, kill |
 
 ## Logging
 
@@ -518,8 +534,7 @@ VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, o
 
 ```sh
 just build                # → target/x86_64-unknown-linux-musl/release/viz-shell
-just install ""           # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
-just install              # → viz-shell2 and vz2, beside another vz you still use
+just install              # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
 just build-base-images    # → the images in images/, built locally
 ```
 

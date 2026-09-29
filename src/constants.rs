@@ -67,6 +67,14 @@ pub const FLOOR_CAPABILITIES: [&str; 4] = ["CHOWN", "SETUID", "SETGID", "KILL"];
 /// On the floor, setuid programs such as sudo or su gain nothing.
 pub const NO_NEW_PRIVILEGES: &str = "no-new-privileges";
 
+/// On the floor, at most this many processes: a runaway or a fork bomb stops
+/// here, not at the host's limit. Builds and agents stay well below it.
+pub const FLOOR_PIDS_LIMIT: i64 = 512;
+
+/// On docker's own network, the host answers to this name, as it does in
+/// Docker Desktop: a shell reaches a service the host runs.
+pub const HOST_ALIAS: &str = "host.docker.internal:host-gateway";
+
 /// Tells the entrypoint that `privileges.sudo` is granted.
 pub const SUDO_ENV: &str = "VZ_SUDO";
 
@@ -106,7 +114,26 @@ pub const HOME_ENV: &str = "HOME";
 pub const HOME_ARG: &str = "VZ_HOME";
 
 /// Host variables copied into the container when set.
-pub const PASSTHROUGH_ENV: [&str; 4] = ["TERM", "COLORTERM", "LANG", LOG_ENV];
+pub const PASSTHROUGH_ENV: [&str; 4] = [TERM_ENV, "COLORTERM", "LANG", LOG_ENV];
+
+/// The host's terminal type, copied in. When the image has no description of
+/// it, as slim images lack those of newer terminals (ghostty, kitty, wezterm),
+/// the shell gets this instead, which every image has.
+pub const TERM_ENV: &str = "TERM";
+pub const FALLBACK_TERM: &str = "xterm-256color";
+
+/// Where terminal descriptions live, besides `$TERMINFO`, `$TERMINFO_DIRS`
+/// and `~/.terminfo`.
+pub const TERMINFO_DIRS: [&str; 4] = [
+    "/etc/terminfo",
+    "/lib/terminfo",
+    "/usr/share/terminfo",
+    "/usr/lib/terminfo",
+];
+
+/// Where the shell is: the container's name, and the profile it runs, when one.
+pub const CONTAINER_ENV: &str = "VZ_CONTAINER";
+pub const CONTAINER_PROFILE_ENV: &str = "VZ_CONTAINER_PROFILE";
 
 /// Where state is kept unless `state_dir` says otherwise: this folder at the
 /// git root. Each state path is stored under it at its container path.

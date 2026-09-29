@@ -394,7 +394,8 @@ impl Keyed for StateItem {
     }
 }
 
-/// A mount: a bare path, read-only, or expanded.
+/// A mount: a bare path, read-only, or expanded. Keyed by where it lands
+/// inside, so one host path can land in several places.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum MountItem {
@@ -405,7 +406,11 @@ pub enum MountItem {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountSpec {
+    /// On the host.
     pub path: String,
+    /// Inside the container; the same as `path` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
     #[serde(default, skip_serializing_if = "MountMode::is_ro")]
     pub mode: MountMode,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
@@ -427,17 +432,18 @@ impl MountMode {
 }
 
 impl Keyed for MountItem {
+    /// The path inside.
     fn key(&self) -> &str {
         match self {
             MountItem::Path(path) => path,
-            MountItem::Full(spec) => &spec.path,
+            MountItem::Full(spec) => spec.target.as_deref().unwrap_or(&spec.path),
         }
     }
 
     fn key_mut(&mut self) -> &mut String {
         match self {
             MountItem::Path(key) => key,
-            MountItem::Full(spec) => &mut spec.path,
+            MountItem::Full(spec) => spec.target.as_mut().unwrap_or(&mut spec.path),
         }
     }
 
@@ -506,8 +512,10 @@ pub struct StateEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MountEntry {
-    /// `~/…` or absolute.
+    /// On the host: `~/…` or absolute.
     pub path: String,
+    /// Inside, when not the same path.
+    pub target: Option<String>,
     pub mode: MountMode,
 }
 
@@ -681,11 +689,15 @@ impl Layer {
                 .into_owned();
             *entry.key_mut() = path;
         }
+        let expand = |path: &str| expand_path(path, home).to_string_lossy().into_owned();
         for entry in &mut self.mounts {
-            let path = expand_path(entry.key(), home)
-                .to_string_lossy()
-                .into_owned();
-            *entry.key_mut() = path;
+            match entry {
+                MountItem::Path(path) => *path = expand(path),
+                MountItem::Full(spec) => {
+                    spec.path = expand(&spec.path);
+                    spec.target = spec.target.as_deref().map(expand);
+                }
+            }
         }
         for profile in self.profiles.values_mut() {
             profile.resolve_paths(dir, home, repo_root)?;
@@ -774,6 +786,9 @@ impl Layer {
         check_unique(&self.mounts, "mount")?;
         for entry in &self.mounts {
             check_path("mount", entry.key())?;
+            if let MountItem::Full(spec) = entry {
+                check_path("mount", &spec.path)?;
+            }
         }
         for name in self.env.defaults.keys() {
             ensure!(
@@ -851,11 +866,16 @@ impl EffectiveConfig {
             .mounts
             .iter()
             .filter(|entry| entry.enabled())
-            .map(|entry| MountEntry {
-                path: entry.key().to_owned(),
-                mode: match entry {
-                    MountItem::Path(_) => MountMode::Ro,
-                    MountItem::Full(spec) => spec.mode,
+            .map(|entry| match entry {
+                MountItem::Path(path) => MountEntry {
+                    path: path.clone(),
+                    target: None,
+                    mode: MountMode::Ro,
+                },
+                MountItem::Full(spec) => MountEntry {
+                    path: spec.path.clone(),
+                    target: spec.target.clone().filter(|target| *target != spec.path),
+                    mode: spec.mode,
                 },
             })
             .collect();
@@ -962,10 +982,11 @@ impl EffectiveConfig {
         let mounts = self
             .mounts
             .iter()
-            .map(|entry| match entry.mode {
-                MountMode::Ro => MountItem::Path(entry.path.clone()),
-                mode => MountItem::Full(MountSpec {
+            .map(|entry| match (&entry.target, entry.mode) {
+                (None, MountMode::Ro) => MountItem::Path(entry.path.clone()),
+                (target, mode) => MountItem::Full(MountSpec {
                     path: entry.path.clone(),
+                    target: target.clone(),
                     mode,
                     enabled: true,
                 }),
@@ -1157,6 +1178,7 @@ mod tests {
     fn mount(path: &str, mode: MountMode) -> MountEntry {
         MountEntry {
             path: path.to_owned(),
+            target: None,
             mode,
         }
     }
@@ -1637,6 +1659,71 @@ profiles:
                 ..effective(&yaml, None)
             };
             assert_eq!(reread, config, "{yaml}");
+        }
+    }
+
+    const TARGETS: &str = "\
+image: debian
+mounts:
+  - { path: ~/skills, target: ~/.agents/skills }
+  - { path: ~/skills, target: ~/.claude/skills }
+  - { path: ~/same, target: ~/same }
+profiles:
+  agents-only:
+    mounts:
+      - { path: ~/skills, target: ~/.claude/skills, enabled: false }
+";
+
+    #[test]
+    fn effective__mount_targets__one_source_at_several_keyed_by_target() {
+        let with_target = |target: &str| MountEntry {
+            target: Some(target.to_owned()),
+            ..mount("~/skills", MountMode::Ro)
+        };
+        let cases = [
+            (
+                None,
+                vec![
+                    with_target("~/.agents/skills"),
+                    with_target("~/.claude/skills"),
+                    mount("~/same", MountMode::Ro),
+                ],
+            ),
+            (
+                Some("agents-only"),
+                vec![
+                    with_target("~/.agents/skills"),
+                    mount("~/same", MountMode::Ro),
+                ],
+            ),
+        ];
+        for (profile, expected) in cases {
+            assert_eq!(effective(TARGETS, profile).mounts, expected, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn to_yaml__mount_targets__parse_back_to_themselves() {
+        let config = effective(TARGETS, None);
+
+        let yaml = config.to_yaml().unwrap();
+
+        assert_eq!(effective(&yaml, None).mounts, config.mounts, "{yaml}");
+    }
+
+    #[test]
+    fn parse__mount_target_or_source_not_absolute__is_refused() {
+        for entry in [
+            "{ path: ~/a, target: relative }",
+            "{ path: relative, target: ~/a }",
+        ] {
+            let text = format!("image: debian\nmounts:\n  - {entry}\n");
+
+            assert!(
+                error(&text).contains("must start with"),
+                "{entry}: {}",
+                error(&text)
+            );
         }
     }
 

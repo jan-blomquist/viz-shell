@@ -14,6 +14,10 @@ trap 'vz kill --all >/dev/null 2>&1 || true' EXIT
 expect_output "no containers yet" "No containers of this repository." vz ls
 expect_output "a container is named, its hostname too" "vz-0-app" inside cat /etc/hostname
 expect_output "and removed on exit" "No containers of this repository." vz ls
+expect_output "the shell knows its container" "vz-0-app" inside sh -c 'echo "$VZ_CONTAINER"'
+expect_output "and its profile, when one" "kept" \
+    vz --profile kept -- sh -c 'echo "$VZ_CONTAINER_PROFILE"'
+vz kill --all >/dev/null
 
 expect_success "persistent: the container outlives its command" vz --profile kept -- true
 expect_output "vz ls lists it, running" "vz-0-app kept yes running" ls_rows

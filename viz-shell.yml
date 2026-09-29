@@ -31,7 +31,6 @@ env:
   defaults:
     RUST_LOG: info
     CARGO_TERM_COLOR: always
-    REPO_ROOT: ${repo}
   files:
     # Host-wide variables, read on the host; skipped where the file is missing.
     - ~/.config/viz-shell/environment
