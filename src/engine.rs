@@ -67,11 +67,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Runs `image`, which must be present, to completion in a container
-    /// that is removed afterwards, and returns the container's exit code.
-    #[instrument(skip(self))]
-    pub async fn run(&self, image: &str) -> anyhow::Result<i32> {
-        let status = attached(RunCommand::new(image).remove().build_command_args()).await?;
+    /// Runs the container on this terminal and returns its exit code.
+    #[instrument(skip_all)]
+    pub async fn run(&self, command: RunCommand) -> anyhow::Result<i32> {
+        let status = attached(command.build_command_args()).await?;
         Ok(exit_code(status))
     }
 }
@@ -117,7 +116,9 @@ mod tests {
         let engine = Engine::detect().await.unwrap();
         engine.pull("hello-world:latest").await.unwrap();
 
-        let exit_code = engine.run("hello-world:latest").await.unwrap();
+        let run = RunCommand::new("hello-world:latest").remove();
+
+        let exit_code = engine.run(run).await.unwrap();
 
         assert_eq!(exit_code, 0);
     }

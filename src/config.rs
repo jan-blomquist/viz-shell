@@ -21,7 +21,7 @@ pub enum ImageSource {
     Build(BuildSpec),
 }
 
-/// Paths are relative to the directory vz runs in.
+/// Paths are relative to the repository root.
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildSpec {
