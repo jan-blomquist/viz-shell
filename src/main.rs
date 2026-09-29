@@ -26,9 +26,10 @@ use crate::build::BuildPlan;
 use crate::cli::{Action, Cli};
 use crate::config::{Config, ImageSource, Layer};
 use crate::constants::{
-    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV,
-    GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV, HOME_ENV, LOG_ENV,
-    MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
+    CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
+    ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
+    HOME_ENV, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SHELL_ENV, SUDO_ENV,
+    UID_ENV, USER_ENV,
 };
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
@@ -257,8 +258,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         None => repo_root.join(DEFAULT_STATE_DIR),
     };
     let state = state::plan(&config.state, &user.home, &state_dir, &repo_root)?;
-    let state_targets: Vec<_> = state.iter().map(|mount| mount.target.clone()).collect();
-    let mounts = mounts::plan(&config.mounts, &user.home, &state_targets)?;
+    let mounts = mounts::plan(&config.mounts, &user.home, &state, &repo_root)?;
     mounts::check_sources_exist(&mounts)?;
 
     let vz_binary = std::env::current_exe().context("locating the vz binary")?;
@@ -366,6 +366,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     }
 
     state::create_sources(&state)?;
+    mounts::create_points_in_state(&mounts)?;
     let image = prepare_image(&engine, &config.image, &config_dir, &repo_root, &user).await?;
     let session_name = match how {
         Launch::New(name) => Some(name),
@@ -386,6 +387,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         );
         let session = Session {
             name: &name,
+            profile,
             labels: &labels,
             persistent: config.persistent,
             image: &image,
@@ -506,6 +508,8 @@ fn reserved_env_names() -> Vec<&'static str> {
         DOCKER_HOST_ENV,
         SUDO_ENV,
         SHELL_ENV,
+        CONTAINER_ENV,
+        CONTAINER_PROFILE_ENV,
     ]
     .into_iter()
     .chain(PASSTHROUGH_ENV)

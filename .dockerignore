@@ -1,5 +1,4 @@
 target/
 .git/
 **/.vz_state/
-.z_cache/
 .idea/

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use docker_wrapper::{DockerCommand, ExecCommand, RunCommand};
 
 use crate::constants::{
-    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SESSION_DIR, SHELL_ENV,
-    SUDO_ENV,
+    CONTAINER_ENV, CONTAINER_PROFILE_ENV, CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES,
+    FLOOR_PIDS_LIMIT, HOST_ALIAS, NO_NEW_PRIVILEGES, SESSION_DIR, SHELL_ENV, SUDO_ENV,
 };
 use crate::mounts::HostMount;
 use crate::share::DockerSocket;
@@ -19,6 +19,8 @@ use crate::user::User;
 pub struct Session<'a> {
     /// The container's name, and its hostname.
     pub name: &'a str,
+    /// The profile it runs, told to the shell with the name.
+    pub profile: Option<&'a str>,
     pub labels: &'a [(String, String)],
     /// Kept after the creating shell exits: the container holds, and every
     /// shell attaches, the first included.
@@ -91,9 +93,10 @@ impl Session<'_> {
                 run = run.tty();
             }
         }
-        if self.host_network {
-            run = run.network("host");
-        }
+        run = match self.host_network {
+            true => run.network("host"),
+            false => run.add_host(HOST_ALIAS),
+        };
         if let Some(shell) = self.shell {
             run = run.env(SHELL_ENV, shell);
         }
@@ -104,8 +107,13 @@ impl Session<'_> {
                 .fold(run.cap_drop("ALL"), |run, capability| {
                     run.cap_add(capability)
                 })
-                .security_opt(NO_NEW_PRIVILEGES),
+                .security_opt(NO_NEW_PRIVILEGES)
+                .pids_limit(FLOOR_PIDS_LIMIT),
         };
+        run = run.env(CONTAINER_ENV, self.name);
+        if let Some(profile) = self.profile {
+            run = run.env(CONTAINER_PROFILE_ENV, profile);
+        }
         let docker_env = self.docker.map(DockerSocket::env).into_iter().flatten();
         let env: Vec<(String, String)> = self
             .user
@@ -183,7 +191,7 @@ impl Session<'_> {
         binds.extend(
             self.mounts
                 .iter()
-                .map(|mount| Bind::new(&mount.path, &mount.path, mount.read_only)),
+                .map(|mount| Bind::new(&mount.source, &mount.target, mount.read_only)),
         );
         binds.extend(
             self.docker
@@ -296,10 +304,20 @@ mod tests {
             kind: StateKind::File,
             init: None,
         }];
-        let mounts = [HostMount {
-            path: PathBuf::from("/home/sally/repos"),
-            read_only: true,
-        }];
+        let mounts = [
+            HostMount {
+                source: PathBuf::from("/home/sally/repos"),
+                target: PathBuf::from("/home/sally/repos"),
+                read_only: true,
+                point_in_state: None,
+            },
+            HostMount {
+                source: PathBuf::from("/home/sally/repos/skills"),
+                target: PathBuf::from("/home/sally/.agents/skills"),
+                read_only: true,
+                point_in_state: None,
+            },
+        ];
         let docker = DockerSocket {
             path: PathBuf::from("/run/user/1000/docker.sock"),
             group: "docker".to_owned(),
@@ -310,6 +328,7 @@ mod tests {
         let labels = [("vz.index".to_owned(), "0".to_owned())];
         let mut session = Session {
             name: "vz-0-vz",
+            profile: None,
             labels: &labels,
             persistent: false,
             image: "vz-vz:abc",
@@ -486,6 +505,7 @@ mod tests {
             has(&args, "--security-opt", "no-new-privileges"),
             "{args:?}"
         );
+        assert!(has(&args, "--pids-limit", "512"), "{args:?}");
         assert!(!args.iter().any(|arg| arg == "VZ_SUDO=1"), "{args:?}");
     }
 
@@ -494,7 +514,7 @@ mod tests {
         let args = args_with(&[], false, true, false);
 
         assert!(has(&args, "--env", "VZ_SUDO=1"), "{args:?}");
-        let floor = ["--cap-drop", "--cap-add", "--security-opt"];
+        let floor = ["--cap-drop", "--cap-add", "--security-opt", "--pids-limit"];
         assert!(
             !args.iter().any(|arg| floor.contains(&arg.as_str())),
             "{args:?}"
@@ -522,6 +542,10 @@ mod tests {
 
         assert!(has(&shared, "--network", "host"), "{shared:?}");
         assert!(!default.iter().any(|arg| arg == "--network"), "{default:?}");
+        // On docker's network the host has a name; on its own network, localhost.
+        let alias = "host.docker.internal:host-gateway";
+        assert!(has(&default, "--add-host", alias), "{default:?}");
+        assert!(!shared.iter().any(|arg| arg == "--add-host"), "{shared:?}");
     }
 
     #[test]
@@ -532,6 +556,26 @@ mod tests {
         assert!(has(&args, "--hostname", "vz-0-vz"), "{args:?}");
         assert!(has(&args, "--label", "vz.index=0"), "{args:?}");
         assert!(has(&args, "--tmpfs", "/run/viz-shell/session"), "{args:?}");
+    }
+
+    #[test]
+    fn create_args__any_session__tells_the_shell_its_container_and_profile() {
+        let plain = args_for(&[], false);
+        let trusted = args_configured(&[], false, false, false, |session| {
+            session.profile = Some("trusted")
+        });
+
+        assert!(has(&plain, "--env", "VZ_CONTAINER=vz-0-vz"), "{plain:?}");
+        assert!(
+            !plain
+                .iter()
+                .any(|arg| arg.starts_with("VZ_CONTAINER_PROFILE")),
+            "{plain:?}"
+        );
+        assert!(
+            has(&trusted, "--env", "VZ_CONTAINER_PROFILE=trusted"),
+            "{trusted:?}"
+        );
     }
 
     #[test]
@@ -648,6 +692,20 @@ mod tests {
 
             assert_eq!(result.is_ok(), reachable, "{inside_vz} {binary}");
         }
+    }
+
+    #[test]
+    fn create_args__mount_with_a_target__host_source_at_its_target() {
+        let args = args_for(&[], true);
+
+        assert!(
+            has(
+                &args,
+                "--mount",
+                "type=bind,src=/home/sally/repos/skills,dst=/home/sally/.agents/skills,readonly"
+            ),
+            "{args:?}"
+        );
     }
 
     #[test]

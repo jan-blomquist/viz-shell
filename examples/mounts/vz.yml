@@ -1,12 +1,25 @@
-# Mounts: host paths shown at the same path inside the container. They reuse
-# the host's own files; each must exist on the host.
+# Mounts: host paths shown inside the container, at the same path unless a
+# `target` names another. They reuse the host's own files; each must exist
+# on the host.
 image: debian:stable-slim
+
+state:
+  # A tool's folder whose contents survive; a mount lands inside it below.
+  - ~/.config/agent
 
 mounts:
   # Every repository, read-only: the bare form. The repository vz runs for
   # stays read-write inside it.
   - ~/repos
+  # One repository read-write for every session, like a shared notes repo.
+  # When vz runs for that repository itself, the entry is skipped: the
+  # repository is mounted there already.
+  - { path: ~/repos/app, mode: rw }
   # The gh CLI's login, shared with the host, read-write.
   - { path: ~/.config/gh, mode: rw }
   # Your git identity: a single file, read-only.
   - ~/.gitconfig
+  # One host folder at two other paths, as a library several tools read:
+  # one of them inside the state folder above.
+  - { path: ~/library, target: ~/.agents/library }
+  - { path: ~/library, target: ~/.config/agent/library }

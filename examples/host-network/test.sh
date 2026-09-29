@@ -11,3 +11,5 @@ trusted_interfaces() { with_profile trusted sh -c "$(declare -f interfaces); int
 
 expect_output "trusted: the host's network interfaces" "$host_interfaces" trusted_interfaces
 expect_output "default: docker's own network" "eth0 lo " inside_interfaces
+host_alias() { inside getent hosts host.docker.internal | awk '{ print $2 }'; }
+expect_output "where the host answers to host.docker.internal" "host.docker.internal" host_alias

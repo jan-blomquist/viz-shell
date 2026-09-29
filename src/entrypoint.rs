@@ -20,8 +20,9 @@ use nix::unistd::{Gid, Uid, setgid, setgroups, setuid};
 use tracing::{debug, warn};
 
 use crate::constants::{
-    GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE, MOUNTINFO_FILE,
-    PASSWD_FILE, READY_FILE, SESSION_DIR, SHELL_ENV, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
+    FALLBACK_TERM, GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE,
+    MOUNTINFO_FILE, PASSWD_FILE, READY_FILE, SESSION_DIR, SHELL_ENV, SHELLS, SUDO_BINARIES,
+    SUDO_ENV, SUDOERS_FILE, TERM_ENV, TERMINFO_DIRS,
 };
 use crate::user::{ExtraGroup, User, with_line};
 
@@ -78,6 +79,11 @@ fn exec_as_user(
 ) -> anyhow::Result<()> {
     become_user(user, extra_groups)?;
     let mut process = user_command(user, shell, command);
+    let term = std::env::var(TERM_ENV).unwrap_or_default();
+    if let Some(fallback) = term_fallback(&term, &terminfo_dirs(&user.home), |path| path.exists()) {
+        debug!("the image has no terminal description for {term}; TERM={fallback} instead");
+        process.env(TERM_ENV, fallback);
+    }
     debug!("exec {process:?} as {}", user.name);
     Err(anyhow!(process.exec())).context("starting the command")
 }
@@ -279,6 +285,43 @@ fn user_command(user: &User, shell: &Path, command: &[String]) -> Command {
     process
 }
 
+/// Where to look for terminal descriptions, as ncurses does: `$TERMINFO`,
+/// `~/.terminfo`, `$TERMINFO_DIRS` (an empty entry for the defaults), then
+/// the defaults.
+fn terminfo_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("TERMINFO")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    dirs.push(home.join(".terminfo"));
+    if let Some(listed) = std::env::var_os("TERMINFO_DIRS") {
+        dirs.extend(std::env::split_paths(&listed).filter(|dir| !dir.as_os_str().is_empty()));
+    }
+    dirs.extend(TERMINFO_DIRS.iter().map(PathBuf::from));
+    dirs
+}
+
+/// `FALLBACK_TERM` when `term` names a terminal none of `dirs` describes;
+/// `None` when it is described, or unset. A description sits under the
+/// name's first letter, or its hex code: `x/xterm-ghostty`, `78/xterm-ghostty`.
+fn term_fallback(
+    term: &str,
+    dirs: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Option<&'static str> {
+    let first = term.chars().next()?;
+    let letters = [first.to_string(), format!("{:x}", u32::from(first))];
+    let described = dirs
+        .iter()
+        .flat_map(|dir| {
+            letters
+                .iter()
+                .map(move |letter| dir.join(letter).join(term))
+        })
+        .any(|entry| exists(&entry));
+    (!described && term != FALLBACK_TERM).then_some(FALLBACK_TERM)
+}
+
 /// The configured `shell` if the image has it; else, with a warning when one
 /// was configured, the first of bash and sh.
 fn choose_shell() -> anyhow::Result<PathBuf> {
@@ -395,6 +438,30 @@ mod tests {
                 expected,
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn term_fallback__described_or_not() {
+        let dirs = [
+            PathBuf::from("/usr/share/terminfo"),
+            PathBuf::from("/lib/terminfo"),
+        ];
+        let present = [
+            "/lib/terminfo/x/xterm-256color",
+            "/usr/share/terminfo/78/xterm-kitty",
+            "/lib/terminfo/d/dumb",
+        ];
+        let exists = |path: &Path| present.iter().any(|entry| Path::new(entry) == path);
+        let cases = [
+            ("xterm-256color", None),
+            ("xterm-kitty", None),
+            ("dumb", None),
+            ("xterm-ghostty", Some("xterm-256color")),
+            ("", None),
+        ];
+        for (term, expected) in cases {
+            assert_eq!(term_fallback(term, &dirs, exists), expected, "{term:?}");
         }
     }
 

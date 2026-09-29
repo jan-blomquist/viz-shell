@@ -75,7 +75,7 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         .iter()
         .map(|mount| {
             let mode = if mount.read_only { "ro" } else { "rw" };
-            format!("{} ({mode})", tilde(&mount.path, home))
+            format!("{} ({mode})", tilde(&mount.target, home))
         })
         .collect();
     let state = match session.state_paths {
@@ -193,12 +193,17 @@ mod tests {
     fn facts__session__one_line_each_in_order() {
         let mounts = [
             HostMount {
-                path: PathBuf::from("/home/sally/repos"),
+                source: PathBuf::from("/home/sally/repos"),
+                target: PathBuf::from("/home/sally/repos"),
                 read_only: true,
+                point_in_state: None,
             },
+            // Shown where it lands.
             HostMount {
-                path: PathBuf::from("/etc/hosts"),
+                source: PathBuf::from("/home/sally/hosts"),
+                target: PathBuf::from("/etc/hosts"),
                 read_only: false,
+                point_in_state: None,
             },
         ];
         let files = [
