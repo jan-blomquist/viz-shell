@@ -1,6 +1,6 @@
 //! State: paths inside the container whose contents outlive it. Each is kept
-//! under the state folder at its own container path, so `~/.claude` lives at
-//! `.vz_state/home/sally/.claude`, and bind-mounted back.
+//! under the state folder at its own container path, so `~/.local/share/opencode` lives at
+//! `.vz_state/home/sally/.local/share/opencode`, and bind-mounted back.
 
 use std::path::{Path, PathBuf};
 
@@ -94,8 +94,12 @@ mod tests {
     #[test]
     fn plan__home_and_absolute_paths__mirrored_under_the_cache() {
         let entries = [
-            entry("~/.claude", StateKind::Dir, None),
-            entry("~/.claude.json", StateKind::File, Some("{}")),
+            entry("~/.local/share/opencode", StateKind::Dir, None),
+            entry(
+                "~/.config/opencode/opencode.json",
+                StateKind::File,
+                Some("{}"),
+            ),
             entry("/var/cache/apt", StateKind::Dir, None),
         ];
 
@@ -115,14 +119,14 @@ mod tests {
         };
         let expected = vec![
             mount(
-                "/home/sally/repos/app/.vz_state/home/sally/.claude",
-                "/home/sally/.claude",
+                "/home/sally/repos/app/.vz_state/home/sally/.local/share/opencode",
+                "/home/sally/.local/share/opencode",
                 StateKind::Dir,
                 None,
             ),
             mount(
-                "/home/sally/repos/app/.vz_state/home/sally/.claude.json",
-                "/home/sally/.claude.json",
+                "/home/sally/repos/app/.vz_state/home/sally/.config/opencode/opencode.json",
+                "/home/sally/.config/opencode/opencode.json",
                 StateKind::File,
                 Some("{}"),
             ),
@@ -165,7 +169,9 @@ mod tests {
     #[test]
     fn create_sources__missing_file__created_with_init_and_parents() {
         let cache = tempfile::tempdir().unwrap();
-        let source = cache.path().join("home/sally/.claude.json");
+        let source = cache
+            .path()
+            .join("home/sally/.config/opencode/opencode.json");
 
         create_sources(&[file_mount(source.clone(), Some("{}"))]).unwrap();
 
@@ -175,7 +181,7 @@ mod tests {
     #[test]
     fn create_sources__existing_file__kept_as_it_is() {
         let cache = tempfile::tempdir().unwrap();
-        let source = cache.path().join(".claude.json");
+        let source = cache.path().join("opencode.json");
         std::fs::write(&source, r#"{"kept":true}"#).unwrap();
 
         create_sources(&[file_mount(source.clone(), Some("{}"))]).unwrap();

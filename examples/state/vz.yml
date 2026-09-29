@@ -7,10 +7,10 @@ image: debian:stable-slim
 state_dir: .vz_state
 
 state:
-  # A folder, the short form: kept at <state_dir>/home/<you>/.claude
-  - ~/.claude
+  # A folder, the short form: kept at <state_dir>/home/<you>/.local/share/opencode
+  - ~/.local/share/opencode
   # A file, created with its init content the first time, never rewritten.
-  - { path: ~/.claude.json, type: file, init: "{}" }
+  - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }
   # Shell history, kept in a folder: point HISTFILE into it.
   - ~/.local/state/bash
   # Caches of language tools.

@@ -133,8 +133,10 @@ mod tests {
     fn args_for(command: &[String], tty: bool) -> Vec<String> {
         let user = sally();
         let state = [StateMount {
-            source: PathBuf::from("/home/sally/repos/vz/.vz_state/home/sally/.claude.json"),
-            target: PathBuf::from("/home/sally/.claude.json"),
+            source: PathBuf::from(
+                "/home/sally/repos/vz/.vz_state/home/sally/.config/opencode/opencode.json",
+            ),
+            target: PathBuf::from("/home/sally/.config/opencode/opencode.json"),
             kind: StateKind::File,
             init: None,
         }];
@@ -192,7 +194,7 @@ mod tests {
             has(
                 &args,
                 "--mount",
-                "type=bind,src=/home/sally/repos/vz/.vz_state/home/sally/.claude.json,dst=/home/sally/.claude.json"
+                "type=bind,src=/home/sally/repos/vz/.vz_state/home/sally/.config/opencode/opencode.json,dst=/home/sally/.config/opencode/opencode.json"
             ),
             "{args:?}"
         );

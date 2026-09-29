@@ -303,10 +303,10 @@ mod tests {
     fn parse__state_short_and_full_forms__reads_path_type_and_init() {
         let text = "image: alpine\n\
                     state:\n  \
-                    - ~/.claude\n  \
+                    - ~/.local/share/opencode\n  \
                     - /var/cache/apt\n  \
                     - { path: ~/.local/share/fish, type: dir }\n  \
-                    - { path: ~/.claude.json, type: file, init: \"{}\" }\n";
+                    - { path: ~/.config/opencode/opencode.json, type: file, init: \"{}\" }\n";
 
         let config = RepoConfig::parse(text).unwrap();
 
@@ -316,10 +316,14 @@ mod tests {
             init: init.map(str::to_owned),
         };
         let expected = vec![
-            entry("~/.claude", StateKind::Dir, None),
+            entry("~/.local/share/opencode", StateKind::Dir, None),
             entry("/var/cache/apt", StateKind::Dir, None),
             entry("~/.local/share/fish", StateKind::Dir, None),
-            entry("~/.claude.json", StateKind::File, Some("{}")),
+            entry(
+                "~/.config/opencode/opencode.json",
+                StateKind::File,
+                Some("{}"),
+            ),
         ];
         assert_eq!(config.state, expected);
     }
@@ -340,7 +344,7 @@ mod tests {
 
     #[test]
     fn parse__state_path_twice__is_refused() {
-        let text = "image: alpine\nstate:\n  - ~/.claude\n  - { path: ~/.claude }\n";
+        let text = "image: alpine\nstate:\n  - ~/.local/share/opencode\n  - { path: ~/.local/share/opencode }\n";
 
         let error = RepoConfig::parse(text).unwrap_err();
 
@@ -349,7 +353,7 @@ mod tests {
 
     #[test]
     fn parse__init_on_a_folder__is_refused() {
-        let text = "image: alpine\nstate:\n  - { path: ~/.claude, init: x }\n";
+        let text = "image: alpine\nstate:\n  - { path: ~/.local/share/opencode, init: x }\n";
 
         let error = RepoConfig::parse(text).unwrap_err();
 

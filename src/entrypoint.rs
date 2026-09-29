@@ -180,7 +180,7 @@ mod tests {
             "/",
             "/home/sally/repos/app",
             "/home/sally/.local/share/fish",
-            "/home/sally/.claude.json",
+            "/home/sally/.config/opencode/opencode.json",
             "/var/cache/apt",
         ]
         .iter()
@@ -190,6 +190,8 @@ mod tests {
         let parents = parents_below(Path::new("/home/sally"), &mount_points);
 
         let expected: BTreeSet<PathBuf> = [
+            "/home/sally/.config",
+            "/home/sally/.config/opencode",
             "/home/sally/.local",
             "/home/sally/.local/share",
             "/home/sally/repos",

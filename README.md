@@ -104,16 +104,18 @@ Container paths whose contents survive the container. Each is kept in the state 
 at the git root by default, at its own container path and mounted back; the host's own files are untouched.
 
 ```yaml
-state_dir: .vz_state                                 # optional: the state folder, see below
+state_dir: .vz_state                     # optional: the state folder, see below
 state:
-  - ~/.claude                                        # folder: the short form
-  - /var/cache/apt                                   # any absolute path
-  - { path: ~/.claude.json, type: file, init: "{}" } # file, created with "{}" the first time
+  - ~/.local/share/opencode              # folder: the short form
+  - /var/cache/apt                       # any absolute path
+  - path: ~/.config/opencode/opencode.json
+    type: file
+    init: "{}"                           # created with "{}" the first time
 ```
 
 | Entry | Inside | Kept at |
 |---|---|---|
-| `~/.claude` | `/home/sally/.claude` | `.vz_state/home/sally/.claude` |
+| `~/.local/share/opencode` | `/home/sally/.local/share/opencode` | `.vz_state/home/sally/.local/share/opencode` |
 | `/var/cache/apt` | `/var/cache/apt` | `.vz_state/var/cache/apt` |
 
 - `type`: `dir` (default) or `file`. `init`: a file's content when `vz` creates it; never rewritten.
