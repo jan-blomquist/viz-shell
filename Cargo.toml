@@ -14,10 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-bollard = "0.21"
-env_logger = "0.11.11"
-futures-util = "0.3.34"
-log = "0.4.34"
+docker-wrapper = { version = "0.11", default-features = false, features = ["tracing"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = "1.3.0"
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+sha2 = "0.11.0"
+tokio = { version = "1.53.1", features = ["macros", "process", "rt-multi-thread"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
