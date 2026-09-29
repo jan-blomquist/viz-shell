@@ -33,3 +33,10 @@ env:
     - .env
   passthrough:
     - GH_TOKEN
+
+profiles:
+  # Adds to the global trusted profile: `vz --profile trusted`.
+  trusted:
+    env:
+      defaults:
+        VZ_TRUSTED: "yes"

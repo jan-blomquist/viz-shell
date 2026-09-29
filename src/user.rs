@@ -66,9 +66,11 @@ impl User {
         ]
     }
 
+    /// No password (`*`), rather than `x` for one in /etc/shadow: the user has
+    /// no shadow entry, and PAM would refuse the account, sudo included.
     pub fn passwd_line(&self, shell: &Path) -> String {
         format!(
-            "{}:x:{}:{}::{}:{}",
+            "{}:*:{}:{}::{}:{}",
             self.name,
             self.uid,
             self.gid,
@@ -254,7 +256,7 @@ mod tests {
     fn passwd_line__user_and_shell__is_passwd_format() {
         let line = sally().passwd_line(Path::new("/bin/bash"));
 
-        assert_eq!(line, "sally:x:1000:1000::/home/sally:/bin/bash");
+        assert_eq!(line, "sally:*:1000:1000::/home/sally:/bin/bash");
     }
 
     #[test]

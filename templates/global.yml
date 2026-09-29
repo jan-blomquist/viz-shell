@@ -6,6 +6,10 @@
 # The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
 image: debian:stable-slim
 
+# The viz-shell banner above an interactive shell: the repository, the
+# profile, and what the shell may do. Never above `vz -- command`.
+banner: true
+
 env:
   files:
     # Variables for every repository; skipped while the file does not exist.
@@ -21,9 +25,16 @@ profiles:
   # `vz --profile trusted`: for repositories you trust. A repository extends it
   # with its own `trusted:`, or with `extends: trusted` in another profile.
   trusted:
+    privileges:
+      # Root through sudo, with docker's default capabilities, instead of the
+      # secure floor, where the shell holds none. The image needs sudo.
+      sudo: true
     share:
       # The host's docker daemon: root-equivalent control of the host.
       docker: true
+      # The host's network: its localhost and ports. Without it the shell still
+      # reaches the internet, through docker's network.
+      host_network: true
     mounts:
       # ssh as on the host: keys readable inside.
       - ~/.ssh
@@ -33,4 +44,3 @@ profiles:
         - trusted.env
       passthrough:
         - GH_TOKEN
-    # Coming with the privileges work: sudo, and the capability settings.

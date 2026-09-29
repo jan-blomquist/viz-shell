@@ -22,6 +22,10 @@ export DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
 # that bakes the home stays cached between runs.
 export HOME=$repo_root/target/vz-examples/$example/home
 rm -rf "$HOME" && mkdir -p "$HOME"
+# An empty global configuration, so the one vz would write on a first run
+# stays out of the tests; a test that wants one writes its own.
+mkdir -p "$HOME/.config/viz-shell"
+printf '# This test brings its own configuration.\n{}\n' > "$HOME/.config/viz-shell/global.yml"
 # Every run starts with no state.
 rm -rf "$example_dir/.vz_state"
 export VZ_LOG=${VZ_LOG:-warn}

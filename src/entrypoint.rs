@@ -5,16 +5,19 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, anyhow};
 use nix::unistd::{Gid, Uid, setgid, setgroups, setuid};
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::constants::{GROUP_FILE, GROUPS_ENV, MOUNTINFO_FILE, PASSWD_FILE, SHELLS};
+use crate::constants::{
+    GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE, MOUNTINFO_FILE,
+    PASSWD_FILE, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
+};
 use crate::user::{ExtraGroup, User, with_line};
 
 /// Returns only on failure; on success the command replaces this process.
@@ -24,6 +27,12 @@ pub fn run(command: &[String]) -> anyhow::Result<()> {
     let shell = default_shell()?;
     add_user(&user, &shell)?;
     add_extra_groups(&user, &extra_groups)?;
+    if let Err(error) = add_hostname() {
+        warn!("the hostname may not resolve: {error:#}");
+    }
+    if std::env::var(SUDO_ENV).is_ok_and(|value| value == "1") {
+        grant_sudo(&user)?;
+    }
     prepare_home(&user)?;
     give_mount_parents(&user)?;
 
@@ -55,6 +64,52 @@ fn add_extra_groups(user: &User, groups: &[ExtraGroup]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Makes the hostname resolve. With `share.host_network` it is the host's,
+/// and the hosts file Docker copies from the host may not list it (systemd
+/// resolves it there); sudo would warn on every use.
+fn add_hostname() -> anyhow::Result<()> {
+    let hostname = read(HOSTNAME_FILE)?;
+    let hosts = read(HOSTS_FILE)?;
+    if let Some(line) = hostname_line(&hosts, hostname.trim()) {
+        write(HOSTS_FILE, &with_line(&hosts, &line))?;
+    }
+    Ok(())
+}
+
+/// The hosts line for `hostname`, unless the hosts file already names it.
+fn hostname_line(hosts: &str, hostname: &str) -> Option<String> {
+    let listed = hosts
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .any(|line| line.split_whitespace().skip(1).any(|name| name == hostname));
+    (!hostname.is_empty() && !listed).then(|| format!("{HOSTNAME_ADDRESS}\t{hostname}"))
+}
+
+/// `privileges.sudo`: a sudoers line for the user, when the image has sudo.
+/// Without it, a warning: the capabilities are there, but no way to use them.
+fn grant_sudo(user: &User) -> anyhow::Result<()> {
+    if !SUDO_BINARIES.iter().any(|path| Path::new(path).exists()) {
+        warn!(
+            "privileges.sudo is granted, but the image has no sudo; install it in the \
+             Dockerfile to use it"
+        );
+        return Ok(());
+    }
+    let file = Path::new(SUDOERS_FILE);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(file, sudoers_line(&user.name))
+        .with_context(|| format!("writing {}", file.display()))?;
+    // sudo ignores a sudoers file anyone but root can write.
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o440))
+        .with_context(|| format!("setting the mode of {}", file.display()))
+}
+
+fn sudoers_line(user: &str) -> String {
+    format!("{user} ALL=(ALL) NOPASSWD:ALL\n")
 }
 
 /// Joins the user's own and extra groups, then becomes the user. Done here
@@ -196,6 +251,27 @@ mod tests {
             group: "sally".to_owned(),
             home: PathBuf::from("/home/sally"),
         }
+    }
+
+    #[test]
+    fn hostname_line__hosts_file__only_when_the_hostname_is_missing() {
+        let hosts = "127.0.0.1\tlocalhost\n# 127.0.1.1 box\n172.17.0.2\tabc123 other\n";
+        let cases = [
+            ("box", Some("127.0.1.1\tbox".to_owned())),
+            ("abc123", None),
+            ("other", None),
+            ("localhost", None),
+            ("", None),
+        ];
+
+        for (hostname, expected) in cases {
+            assert_eq!(hostname_line(hosts, hostname), expected, "{hostname}");
+        }
+    }
+
+    #[test]
+    fn sudoers_line__user__without_a_password() {
+        assert_eq!(sudoers_line("sally"), "sally ALL=(ALL) NOPASSWD:ALL\n");
     }
 
     #[test]
