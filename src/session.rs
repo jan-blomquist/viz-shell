@@ -2,7 +2,7 @@
 //! host, the host's working directory, the state and host mounts, and the
 //! host user, recreated by the entrypoint from the launcher's own binary.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use docker_wrapper::{DockerCommand, RunCommand};
 
@@ -137,18 +137,32 @@ impl<'a> Bind<'a> {
 }
 
 /// Inside a vz container, a nested vz asks the host's daemon to mount its
-/// own binary; that path must exist on the host too. Only a binary within
-/// the repository, mounted at the same path, is sure to.
+/// own binary by path, so that path must exist on the host too. vz shows
+/// host paths at the same path, except its own binary at /run/viz-shell: a
+/// binary on any other mount is on the host; one in the image itself, on
+/// `/`, or the self-mount is not. `mount_points` is the container's mount
+/// table; `None` outside a vz container.
 pub fn check_binary_reachable(
-    inside_vz: bool,
     vz_binary: &Path,
-    repo_root: &Path,
+    mount_points: Option<&[PathBuf]>,
 ) -> anyhow::Result<()> {
+    let Some(mount_points) = mount_points else {
+        return Ok(());
+    };
+    let self_mount = Path::new(ENTRYPOINT_PATH)
+        .parent()
+        .unwrap_or(Path::new("/"));
+    let covering = mount_points
+        .iter()
+        .filter(|point| vz_binary.starts_with(point))
+        .max_by_key(|point| point.components().count());
+    let on_the_host =
+        covering.is_some_and(|point| point != Path::new("/") && !point.starts_with(self_mount));
     anyhow::ensure!(
-        !inside_vz || vz_binary.starts_with(repo_root),
-        "inside a vz container, run a vz built in the repository (such as \
-         target/x86_64-unknown-linux-musl/release/viz-shell): the host's docker mounts \
-         {} from the host, where it does not exist",
+        on_the_host,
+        "inside a vz container, run a viz-shell on a path the host has too, such as the \
+         repository's target/x86_64-unknown-linux-musl/release/viz-shell: the host's docker \
+         mounts {} from the host",
         vz_binary.display()
     );
     Ok(())
@@ -162,7 +176,7 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::cli::{Cli, Internal};
+    use crate::cli::{Action, Cli};
     use crate::config::StateKind;
 
     fn sally() -> User {
@@ -302,10 +316,10 @@ mod tests {
             )
             .unwrap();
 
-            let expected = Internal::Entrypoint {
+            let expected = Action::Entrypoint {
                 command: command.clone(),
             };
-            assert_eq!(cli.internal, Some(expected), "command: {command:?}");
+            assert_eq!(cli.action, Some(expected), "command: {command:?}");
         }
     }
 
@@ -353,24 +367,32 @@ mod tests {
 
     #[test]
     fn check_binary_reachable__cases() {
-        let repo = Path::new("/home/sally/repos/vz");
-        let built =
-            Path::new("/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/viz-shell");
+        let mounts: Vec<PathBuf> = [
+            "/",
+            "/proc",
+            "/home/sally/repos",
+            "/home/sally/repos/vz",
+            "/run/viz-shell/viz-shell",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let built = "/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/viz-shell";
         let cases = [
-            (false, Path::new("/run/viz-shell/viz-shell"), true),
-            (true, built, true),
-            (true, Path::new("/run/viz-shell/viz-shell"), false),
-            (true, Path::new("/usr/local/bin/viz-shell"), false),
+            // Outside a vz container, anything goes.
+            (None, "/run/viz-shell/viz-shell", true),
+            // On a same-path mount: the repository, or a sibling under ~/repos.
+            (Some(&mounts[..]), built, true),
+            (Some(&mounts[..]), "/home/sally/repos/other/viz-shell", true),
+            // The self-mount, or the image itself.
+            (Some(&mounts[..]), "/run/viz-shell/viz-shell", false),
+            (Some(&mounts[..]), "/usr/local/bin/viz-shell", false),
         ];
-        for (inside_vz, binary, reachable) in cases {
-            let result = check_binary_reachable(inside_vz, binary, repo);
+        for (mounts, binary, reachable) in cases {
+            let inside_vz = mounts.is_some();
+            let result = check_binary_reachable(Path::new(binary), mounts);
 
-            assert_eq!(
-                result.is_ok(),
-                reachable,
-                "{inside_vz} {}",
-                binary.display()
-            );
+            assert_eq!(result.is_ok(), reachable, "{inside_vz} {binary}");
         }
     }
 

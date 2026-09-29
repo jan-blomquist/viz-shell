@@ -23,23 +23,17 @@ pub fn root() -> anyhow::Result<PathBuf> {
 }
 
 /// The repository's configuration file: the first of `REPO_CONFIG_FILES`
-/// present at the root. Others present are ignored, with a warning.
-pub fn config_file(root: &Path) -> anyhow::Result<PathBuf> {
+/// present at the root, if any. Others present are ignored, with a warning.
+pub fn config_file(root: &Path) -> Option<PathBuf> {
     let present: Vec<&str> = REPO_CONFIG_FILES
         .into_iter()
         .filter(|name| root.join(name).is_file())
         .collect();
-    let (chosen, ignored) = present.split_first().with_context(|| {
-        format!(
-            "no configuration at {}: add one of {}",
-            root.display(),
-            REPO_CONFIG_FILES.join(", ")
-        )
-    })?;
+    let (chosen, ignored) = present.split_first()?;
     if !ignored.is_empty() {
         warn!("using {chosen}; ignoring {}", ignored.join(", "));
     }
-    Ok(root.join(chosen))
+    Some(root.join(chosen))
 }
 
 pub fn dir_name(root: &Path) -> String {
@@ -82,14 +76,9 @@ mod tests {
     }
 
     #[test]
-    fn config_file__none__is_refused_naming_the_accepted_names() {
+    fn config_file__none__is_none() {
         let root = root_with(&[]);
 
-        let error = config_file(root.path()).unwrap_err().to_string();
-
-        assert!(
-            error.contains("viz-shell.yml, viz-shell.yaml, vz.yml, vz.yaml"),
-            "{error}"
-        );
+        assert_eq!(config_file(root.path()), None);
     }
 }

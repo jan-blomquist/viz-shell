@@ -9,10 +9,10 @@ use crate::constants::PROFILE_ENV;
 #[command(name = "viz-shell", version, args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
-    pub internal: Option<Internal>,
+    pub action: Option<Action>,
 
-    /// The configuration to use instead of the one at the git root
-    /// (viz-shell.yml, …, vz.yaml). Paths in it are relative to its folder.
+    /// The repository configuration to use instead of the one at the git
+    /// root (viz-shell.yml, …, vz.yaml). Paths in it are relative to its folder.
     #[arg(short = 'c', long)]
     pub config_file: Option<PathBuf>,
 
@@ -40,7 +40,9 @@ pub struct Cli {
 }
 
 #[derive(Debug, PartialEq, Subcommand)]
-pub enum Internal {
+pub enum Action {
+    /// List the profiles of the global and the repository configuration
+    Profiles,
     /// Inside the container: add the host user, then run the command as it
     #[command(hide = true)]
     Entrypoint {
@@ -95,9 +97,9 @@ mod tests {
     fn parse__entrypoint__carries_its_command() {
         let cli = Cli::try_parse_from(["vz", "entrypoint", "--", "bash", "-l"]).unwrap();
 
-        let expected = Internal::Entrypoint {
+        let expected = Action::Entrypoint {
             command: strings(&["bash", "-l"]),
         };
-        assert_eq!(cli.internal, Some(expected));
+        assert_eq!(cli.action, Some(expected));
     }
 }

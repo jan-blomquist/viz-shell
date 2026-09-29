@@ -2,6 +2,11 @@
 /// present is used; others present are ignored, with a warning.
 pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
 
+/// The global configuration: `$XDG_CONFIG_HOME/viz-shell/global.yml`, or
+/// `~/.config/viz-shell/global.yml` without it. What every repository starts from.
+pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";
+pub const GLOBAL_CONFIG_FILE: &str = "global.yml";
+
 /// Selects a profile when `--profile` is not given; CI sets it once.
 pub const PROFILE_ENV: &str = "VZ_PROFILE";
 

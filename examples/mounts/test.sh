@@ -6,9 +6,6 @@ source "$(dirname "$0")/../assert.sh"
 mkdir -p "$HOME/repos/other" "$HOME/.config/gh"
 echo hello > "$HOME/repos/other/readme"
 echo "[user]" > "$HOME/.gitconfig"
-app="$HOME/repos/app"
-git init -q "$app"
-cd "$app"
 
 expect_success "the container starts" inside true
 expect_output "a read-only mount is readable" "hello" inside cat "$HOME/repos/other/readme"

@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, bail, ensure};
 use tracing::debug;
 
-use crate::config::{EffectiveEnv, EnvFile, is_env_name, resolve_host_path};
+use crate::config::{EffectiveEnv, EnvFile, is_env_name, resolve_host_path, substitute};
 
 /// Where a variable's value came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,8 +87,8 @@ pub fn plan(env: &EffectiveEnv, cli: &[CliEnv], paths: &Paths) -> anyhow::Result
         .defaults
         .iter()
         .map(|(name, value)| {
-            let value =
-                substitute(value, paths).with_context(|| format!("in env default `{name}`"))?;
+            let value = substitute(value, paths.repo_root, paths.home)
+                .with_context(|| format!("in env default `{name}`"))?;
             Ok((name.clone(), value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -164,7 +164,7 @@ pub fn without_reserved(mut environment: Environment, reserved: &[&str]) -> Envi
 fn load_files(files: &[EnvFile], paths: &Paths) -> anyhow::Result<Vec<LoadedFile>> {
     let mut loaded = Vec::new();
     for file in files {
-        let written = substitute(&file.path, paths)
+        let written = substitute(&file.path, paths.repo_root, paths.home)
             .with_context(|| format!("in env file `{}`", file.path))?;
         let path = resolve_host_path(&written, paths.config_dir, paths.home);
         if !path.exists() {
@@ -208,28 +208,6 @@ fn refuse_tracked(path: &Path, repo_root: &Path) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-/// `${repo}` and `${home}`; any other `${…}` is an error. A `$` not followed
-/// by `{` stays as it is.
-fn substitute(text: &str, paths: &Paths) -> anyhow::Result<String> {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let end = after
-            .find('}')
-            .with_context(|| format!("`{text}` has a `${{` without `}}`"))?;
-        match &after[..end] {
-            "repo" => out.push_str(&paths.repo_root.to_string_lossy()),
-            "home" => out.push_str(&paths.home.to_string_lossy()),
-            other => bail!("`${{{other}}}` in `{text}`: vz substitutes ${{repo}} and ${{home}}"),
-        }
-        rest = &after[end + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
 }
 
 /// `*` matches any run of characters, `?` any one.
@@ -277,14 +255,6 @@ mod tests {
         EnvVar {
             value: value.to_owned(),
             source,
-        }
-    }
-
-    fn paths() -> Paths<'static> {
-        Paths {
-            config_dir: Path::new("/home/sally/repos/app"),
-            repo_root: Path::new("/home/sally/repos/app"),
-            home: Path::new("/home/sally"),
         }
     }
 
@@ -360,36 +330,6 @@ mod tests {
         let kept = without_reserved(environment, &["HOME", "VZ_UID"]);
 
         assert_eq!(kept.keys().collect::<Vec<_>>(), ["KEEP"]);
-    }
-
-    #[test]
-    fn substitute__cases() {
-        let cases = [
-            ("plain", "plain"),
-            ("${repo}/data", "/home/sally/repos/app/data"),
-            ("${home}/.cache", "/home/sally/.cache"),
-            ("cost: $5 and $HOME", "cost: $5 and $HOME"),
-        ];
-        for (text, expected) in cases {
-            assert_eq!(
-                substitute(text, &paths()).unwrap(),
-                expected,
-                "text: {text}"
-            );
-        }
-    }
-
-    #[test]
-    fn substitute__unknown_or_unclosed__is_refused_naming_it() {
-        for (text, expected) in [
-            ("${profile}", "${profile}"),
-            ("${env:X}", "${env:X}"),
-            ("${repo", "without"),
-        ] {
-            let error = substitute(text, &paths()).unwrap_err().to_string();
-
-            assert!(error.contains(expected), "{text}: {error}");
-        }
     }
 
     #[test]
