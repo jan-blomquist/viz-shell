@@ -10,6 +10,9 @@ Linux first, shell first, no editor required
 - [Use](#use)
 - [Images](#images)
 - [Your user in the image](#your-user-in-the-image)
+- [State](#state)
+- [Mounts](#mounts)
+- [Examples](#examples)
 - [Logging](#logging)
 - [Test](#test)
 - [License](#license)
@@ -28,9 +31,10 @@ because `vz` mounts itself into every container it starts: build it anywhere, ru
 ```sh
 vz                  # a shell: bash, else sh
 vz -- cargo test    # one command instead
+vz -c other.yml     # another configuration: -c, --config-file
 ```
 
-`vz` reads `vz.yml` at the git root, pulls or builds the image if missing, and runs a container
+`vz` reads `vz.yml` at the git root, or the `-c` file, pulls or builds the image if missing, and runs a container
 that is removed on exit; `vz` exits with its exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
@@ -46,9 +50,9 @@ image: hello-world            # pull
 ```
 
 ```yaml
-image:                        # build; paths relative to the git root
+image:                        # build; paths relative to the vz.yml's folder
   dockerfile: Dockerfile
-  context: .                  # optional, default: the git root
+  context: .                  # optional, default: the vz.yml's folder
   args: { GREETING: hello }   # optional
 ```
 
@@ -94,6 +98,68 @@ Alpine: `addgroup -g "$VZ_GID" "$VZ_GROUP" && adduser -D -u "$VZ_UID" -G "$VZ_GR
 - `USER` affects only the build; the container always starts as root for the entrypoint.
 - Don't set these in `vz.yml` `args`: they would override yours and fail the match.
 
+## State
+
+Container paths whose contents survive the container. Each is kept in the state folder, `.vz_state/`
+at the git root by default, at its own container path and mounted back; the host's own files are untouched.
+
+```yaml
+state_dir: .vz_state                     # optional: the state folder, see below
+state:
+  - ~/.local/share/opencode              # folder: the short form
+  - /var/cache/apt                       # any absolute path
+  - path: ~/.config/opencode/opencode.json
+    type: file
+    init: "{}"                           # created with "{}" the first time
+```
+
+| Entry | Inside | Kept at |
+|---|---|---|
+| `~/.local/share/opencode` | `/home/sally/.local/share/opencode` | `.vz_state/home/sally/.local/share/opencode` |
+| `/var/cache/apt` | `/var/cache/apt` | `.vz_state/var/cache/apt` |
+
+- `type`: `dir` (default) or `file`. `init`: a file's content when `vz` creates it; never rewritten.
+- `state_dir`: relative to the `vz.yml`'s folder, `~/…` or absolute. Without it every configuration,
+  `-c` ones included, shares `.vz_state/` at the git root.
+- `vz` creates missing entries as you. Delete the state folder to start over; ignoring it in git is up to you,
+  but keep it out of Docker build contexts: `**/.vz_state/` in `.dockerignore`.
+- A state folder hides what the image had at that path, and belongs to you.
+- A `file` suits tools that update in place. One that saves by rename (`git config`) fails with
+  "Device or resource busy": keep a folder and point the tool into it.
+- Paths start with `~/` or `/`, without `.`, `..` or `//`, and may not hold or sit inside the repository.
+
+## Mounts
+
+Host paths shown at the same path inside, reusing the host's own files.
+
+```yaml
+mounts:
+  - ~/repos            # read-only, the default
+  - ~/.gitconfig:ro    # read-only, spelled out
+  - ~/.config/gh:rw    # read-write
+```
+
+The suffix follows docker's `-v`; any other suffix is refused. The full form works too:
+`- { path: ~/.config/gh, mode: rw }`, or as a block mapping.
+
+- The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
+  deeper mounts land on top.
+- A mount must exist on the host; `vz` never creates one.
+- Paths follow the state rules; a mount may not overlap a state path.
+
+## Examples
+
+Recipes in [`examples/`](examples), each with a `test.sh` that runs it and checks the result.
+Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in place with `-c`.
+
+| Recipe | Shows |
+|---|---|
+| [`pull-image`](examples/pull-image) | the smallest `vz.yml` |
+| [`build-dockerfile`](examples/build-dockerfile) | building from a Dockerfile, with args |
+| [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
+| [`state`](examples/state) | folders, a file with `init`, absolute paths |
+| [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file |
+
 ## Logging
 
 Stderr, filtered by `VZ_LOG` (default `warn,vz=info`):
@@ -105,9 +171,14 @@ VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, o
 
 ## Test
 
+Build first (`just build`); the example tests run `target/.../release/vz`, or `$VZ`.
+Each runs with a throwaway `HOME` (`/tmp/vz-examples/<example>/home`), so `~` never touches yours,
+and starts with an empty `.vz_state/`.
+
 ```sh
-cargo test                 # unit tests, no engine needed
-cargo test -- --ignored    # needs a Docker engine
+just test                  # unit tests, no engine needed
+just examples              # every example's test.sh, against the built vz; needs docker
+just example state         # one of them
 ```
 
 ## License

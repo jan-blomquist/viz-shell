@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 
 use crate::config::BuildSpec;
 use crate::constants::{BUILT_IMAGE_PREFIX, CONTENT_HASH_LEN, FALLBACK_IMAGE_NAME};
-use crate::repo;
 use crate::user::User;
 
 #[derive(Debug)]
@@ -27,24 +26,25 @@ pub struct BuildPlan {
 }
 
 impl BuildPlan {
-    /// Resolves the spec's paths against the repository root, reads the
+    /// Resolves the spec's paths against the folder of its `vz.yml`, reads the
     /// Dockerfile, and adds the user's build args it declares; `vz.yml` args win.
-    pub fn load(spec: &BuildSpec, repo_root: &Path, user: &User) -> anyhow::Result<Self> {
-        let dockerfile = repo_root.join(&spec.dockerfile);
+    pub fn load(
+        spec: &BuildSpec,
+        config_dir: &Path,
+        repo_dir_name: &str,
+        user: &User,
+    ) -> anyhow::Result<Self> {
+        let dockerfile = config_dir.join(&spec.dockerfile);
         let dockerfile_text = std::fs::read_to_string(&dockerfile)
             .with_context(|| format!("reading {}", dockerfile.display()))?;
         let mut args = identity_args(&dockerfile_text, user);
         args.extend(spec.args.clone());
         let resolved = BuildSpec {
             dockerfile,
-            context: repo_root.join(&spec.context),
+            context: config_dir.join(&spec.context),
             args,
         };
-        Ok(Self::new(
-            &resolved,
-            &repo::dir_name(repo_root),
-            &dockerfile_text,
-        ))
+        Ok(Self::new(&resolved, repo_dir_name, &dockerfile_text))
     }
 
     fn new(spec: &BuildSpec, repo_dir_name: &str, dockerfile_text: &str) -> Self {
@@ -244,6 +244,27 @@ mod tests {
             ("VZ_USER".to_owned(), "sally".to_owned()),
         ]);
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn load__paths_relative_to_config_dir__vz_yml_args_win_over_identity() {
+        let config_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            config_dir.path().join("Dockerfile"),
+            "FROM alpine\nARG VZ_UID\n",
+        )
+        .unwrap();
+        let spec = BuildSpec {
+            dockerfile: PathBuf::from("Dockerfile"),
+            context: PathBuf::from("."),
+            args: args(&[("VZ_UID", "4242")]),
+        };
+
+        let plan = BuildPlan::load(&spec, config_dir.path(), "app", &sally()).unwrap();
+
+        assert_eq!(plan.dockerfile, config_dir.path().join("Dockerfile"));
+        assert_eq!(plan.context, config_dir.path().join("."));
+        assert_eq!(plan.args, args(&[("VZ_UID", "4242")]));
     }
 
     #[test]

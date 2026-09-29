@@ -1,12 +1,14 @@
 //! The `docker run` for a session: the repository at the same path as on the
-//! host, the host's working directory, and the host user, recreated by the
-//! entrypoint from the launcher's own binary.
+//! host, the host's working directory, the state and host mounts, and the
+//! host user, recreated by the entrypoint from the launcher's own binary.
 
 use std::path::Path;
 
 use docker_wrapper::RunCommand;
 
 use crate::constants::{CONTAINER_ROOT, ENTRYPOINT_PATH};
+use crate::mounts::HostMount;
+use crate::state::StateMount;
 use crate::user::User;
 
 pub struct Session<'a> {
@@ -16,6 +18,8 @@ pub struct Session<'a> {
     /// The launcher's own binary; static, so it runs in any image.
     pub vz_binary: &'a Path,
     pub user: &'a User,
+    pub state: &'a [StateMount],
+    pub mounts: &'a [HostMount],
     /// Host variables to copy in, already filtered to those that are set.
     pub passthrough: &'a [(String, String)],
     /// Empty for the shell.
@@ -37,10 +41,12 @@ impl Session<'_> {
             .interactive()
             .user(CONTAINER_ROOT)
             .entrypoint(ENTRYPOINT_PATH)
-            .mount(bind_mount(self.vz_binary, Path::new(ENTRYPOINT_PATH), true))
-            .mount(bind_mount(self.repo_root, self.repo_root, false))
             .workdir(self.workdir)
             .cmd(entrypoint_args);
+        run = self
+            .binds()
+            .iter()
+            .fold(run, |run, bind| run.mount(bind.to_mount_arg()));
         if self.tty {
             run = run.tty();
         }
@@ -55,13 +61,53 @@ impl Session<'_> {
     }
 }
 
-fn bind_mount(src: &Path, dst: &Path, read_only: bool) -> String {
-    let read_only = if read_only { ",readonly" } else { "" };
-    format!(
-        "type=bind,src={},dst={}{read_only}",
-        src.display(),
-        dst.display()
-    )
+impl Session<'_> {
+    /// Every bind mount, shallowest destination first, so a deeper mount
+    /// always lands on top of one that holds it: the read-write repository
+    /// inside a read-only `~/repos`.
+    fn binds(&self) -> Vec<Bind<'_>> {
+        let mut binds = vec![
+            Bind::new(self.vz_binary, Path::new(ENTRYPOINT_PATH), true),
+            Bind::new(self.repo_root, self.repo_root, false),
+        ];
+        binds.extend(
+            self.state
+                .iter()
+                .map(|mount| Bind::new(&mount.source, &mount.target, false)),
+        );
+        binds.extend(
+            self.mounts
+                .iter()
+                .map(|mount| Bind::new(&mount.path, &mount.path, mount.read_only)),
+        );
+        binds.sort_by_key(|bind| bind.dst.components().count());
+        binds
+    }
+}
+
+struct Bind<'a> {
+    src: &'a Path,
+    dst: &'a Path,
+    read_only: bool,
+}
+
+impl<'a> Bind<'a> {
+    fn new(src: &'a Path, dst: &'a Path, read_only: bool) -> Self {
+        Self {
+            src,
+            dst,
+            read_only,
+        }
+    }
+
+    fn to_mount_arg(&self) -> String {
+        let read_only = if self.read_only { ",readonly" } else { "" };
+        format!(
+            "type=bind,src={},dst={}{read_only}",
+            self.src.display(),
+            self.dst.display()
+        )
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +118,7 @@ mod tests {
     use docker_wrapper::DockerCommand;
 
     use super::*;
+    use crate::config::StateKind;
 
     fn sally() -> User {
         User {
@@ -85,6 +132,18 @@ mod tests {
 
     fn args_for(command: &[String], tty: bool) -> Vec<String> {
         let user = sally();
+        let state = [StateMount {
+            source: PathBuf::from(
+                "/home/sally/repos/vz/.vz_state/home/sally/.config/opencode/opencode.json",
+            ),
+            target: PathBuf::from("/home/sally/.config/opencode/opencode.json"),
+            kind: StateKind::File,
+            init: None,
+        }];
+        let mounts = [HostMount {
+            path: PathBuf::from("/home/sally/repos"),
+            read_only: true,
+        }];
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
         let session = Session {
             image: "vz-vz:abc",
@@ -92,6 +151,8 @@ mod tests {
             workdir: Path::new("/home/sally/repos/vz/src"),
             vz_binary: Path::new("/home/sally/.cargo/bin/vz"),
             user: &user,
+            state: &state,
+            mounts: &mounts,
             passthrough: &passthrough,
             command,
             tty,
@@ -120,6 +181,20 @@ mod tests {
                 &args,
                 "--mount",
                 "type=bind,src=/home/sally/.cargo/bin/vz,dst=/run/vz/vz,readonly"
+            ),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn run_command__state__bind_mounts_each_from_the_cache() {
+        let args = args_for(&[], true);
+
+        assert!(
+            has(
+                &args,
+                "--mount",
+                "type=bind,src=/home/sally/repos/vz/.vz_state/home/sally/.config/opencode/opencode.json,dst=/home/sally/.config/opencode/opencode.json"
             ),
             "{args:?}"
         );
@@ -164,16 +239,12 @@ mod tests {
     }
 
     #[test]
-    fn bind_mount__read_only_and_not() {
-        let cases = [
-            (false, "type=bind,src=/a,dst=/b"),
-            (true, "type=bind,src=/a,dst=/b,readonly"),
-        ];
-        for (read_only, expected) in cases {
-            assert_eq!(
-                bind_mount(Path::new("/a"), Path::new("/b"), read_only),
-                expected
-            );
-        }
+    fn run_command__read_only_parent_of_the_repository__mounted_before_it() {
+        let args = args_for(&[], true);
+
+        let position = |mount: &str| args.iter().position(|arg| arg == mount).unwrap();
+        let parent = position("type=bind,src=/home/sally/repos,dst=/home/sally/repos,readonly");
+        let repository = position("type=bind,src=/home/sally/repos/vz,dst=/home/sally/repos/vz");
+        assert!(parent < repository, "{args:?}");
     }
 }

@@ -2,6 +2,10 @@
 //! the host user to the image unless the image already has it, gives it its
 //! home, then becomes that user and replaces itself with the command.
 
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,7 +13,7 @@ use std::process::Command;
 use anyhow::{Context, anyhow};
 use tracing::debug;
 
-use crate::constants::{GROUP_FILE, PASSWD_FILE, SHELLS};
+use crate::constants::{GROUP_FILE, MOUNTINFO_FILE, PASSWD_FILE, SHELLS};
 use crate::user::{User, with_line};
 
 /// Returns only on failure; on success the command replaces this process.
@@ -18,6 +22,7 @@ pub fn run(command: &[String]) -> anyhow::Result<()> {
     let shell = default_shell()?;
     add_user(&user, &shell)?;
     prepare_home(&user)?;
+    give_mount_parents(&user)?;
 
     let mut process = user_command(&user, &shell, command);
     debug!("exec {process:?} as {}", user.name);
@@ -37,13 +42,82 @@ fn add_user(user: &User, shell: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The home may already exist, created as root by the engine to hold a
-/// mount beneath it; only the home itself changes owner.
+/// The home may already exist: created as root by the engine to hold a mount
+/// beneath it, or a host mount itself, which is left alone.
 fn prepare_home(user: &User) -> anyhow::Result<()> {
     std::fs::create_dir_all(&user.home)
         .with_context(|| format!("creating {}", user.home.display()))?;
-    std::os::unix::fs::chown(&user.home, Some(user.uid), Some(user.gid))
-        .with_context(|| format!("giving {} to {}", user.home.display(), user.name))
+    give_if_root_owned(&user.home, user)
+}
+
+/// The engine creates the missing parents of each mount point as root. Under
+/// the home they belong to the user: `~/repos` above the repository, `~/.local`
+/// above a `~/.local/share/fish` state mount. Only root-owned ones change.
+fn give_mount_parents(user: &User) -> anyhow::Result<()> {
+    let mountinfo = read(MOUNTINFO_FILE)?;
+    for dir in parents_below(&user.home, &mount_points(&mountinfo)) {
+        give_if_root_owned(&dir, user)?;
+    }
+    Ok(())
+}
+
+/// Only a root-owned folder changes owner, so host mounts, read-only ones
+/// included, are never touched.
+fn give_if_root_owned(dir: &Path, user: &User) -> anyhow::Result<()> {
+    let root_owned = std::fs::metadata(dir).is_ok_and(|meta| meta.uid() == 0);
+    if root_owned {
+        std::os::unix::fs::chown(dir, Some(user.uid), Some(user.gid))
+            .with_context(|| format!("giving {} to {}", dir.display(), user.name))?;
+    }
+    Ok(())
+}
+
+/// The mount point of each line of `/proc/self/mountinfo`: the fifth field,
+/// with the kernel's octal escapes (`\040` for a space) undone.
+fn mount_points(mountinfo: &str) -> Vec<PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(|field| PathBuf::from(OsString::from_vec(unescape_octal(field))))
+        .collect()
+}
+
+fn unescape_octal(field: &str) -> Vec<u8> {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = bytes
+            .get(i + 1..i + 4)
+            .filter(|_| bytes[i] == b'\\')
+            .and_then(|digits| u8::from_str_radix(std::str::from_utf8(digits).ok()?, 8).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Folders strictly between `home` and each mount point below it.
+fn parents_below(home: &Path, mount_points: &[PathBuf]) -> BTreeSet<PathBuf> {
+    mount_points
+        .iter()
+        .flat_map(|mount_point| {
+            mount_point
+                .ancestors()
+                .skip(1)
+                .take_while(|dir| *dir != home && dir.starts_with(home))
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn user_command(user: &User, shell: &Path, command: &[String]) -> Command {
@@ -77,4 +151,66 @@ fn read(path: &str) -> anyhow::Result<String> {
 fn write(path: &str, text: &str) -> anyhow::Result<()> {
     std::fs::write(path, text)
         .with_context(|| format!("writing {path}; vz entrypoint must start as root"))
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)] // unit__scenario__expected test names
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_points__mountinfo_lines__fifth_field_unescaped() {
+        let mountinfo = "\
+            22 1 0:21 / / rw,relatime - overlay overlay rw\n\
+            23 22 8:1 /src /home/sally/repos/app rw - ext4 /dev/sda1 rw\n\
+            24 22 8:1 /x /home/sally/my\\040notes rw - ext4 /dev/sda1 rw\n";
+
+        let points = mount_points(mountinfo);
+
+        let expected: Vec<PathBuf> = ["/", "/home/sally/repos/app", "/home/sally/my notes"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(points, expected);
+    }
+
+    #[test]
+    fn parents_below__mounts_inside_and_outside_home__only_folders_between() {
+        let mount_points: Vec<PathBuf> = [
+            "/",
+            "/home/sally/repos/app",
+            "/home/sally/.local/share/fish",
+            "/home/sally/.config/opencode/opencode.json",
+            "/var/cache/apt",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let parents = parents_below(Path::new("/home/sally"), &mount_points);
+
+        let expected: BTreeSet<PathBuf> = [
+            "/home/sally/.config",
+            "/home/sally/.config/opencode",
+            "/home/sally/.local",
+            "/home/sally/.local/share",
+            "/home/sally/repos",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(parents, expected);
+    }
+
+    #[test]
+    fn unescape_octal__escapes_and_plain_backslashes() {
+        let cases: [(&str, &[u8]); 3] = [
+            ("a\\040b", b"a b"),
+            ("tab\\011", b"tab\t"),
+            ("plain\\x", b"plain\\x"),
+        ];
+        for (field, expected) in cases {
+            assert_eq!(unescape_octal(field), expected, "field: {field}");
+        }
+    }
 }
