@@ -4,8 +4,10 @@ mod config;
 mod constants;
 mod engine;
 mod entrypoint;
+mod mounts;
 mod repo;
 mod session;
+mod state;
 mod user;
 
 use std::io::IsTerminal;
@@ -19,7 +21,9 @@ use tracing_subscriber::EnvFilter;
 use crate::build::BuildPlan;
 use crate::cli::{Cli, Internal};
 use crate::config::{ImageSource, RepoConfig};
-use crate::constants::{DEFAULT_LOG_FILTER, LOG_ENV, PASSTHROUGH_ENV, REPO_CONFIG_FILE};
+use crate::constants::{
+    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, LOG_ENV, PASSTHROUGH_ENV, REPO_CONFIG_FILE,
+};
 use crate::engine::Engine;
 use crate::session::Session;
 use crate::user::User;
@@ -33,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         Some(Internal::Entrypoint { command }) => entrypoint::run(&command),
         None => {
             let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
-            let exit_code = runtime.block_on(launch(&cli.command))?;
+            let exit_code = runtime.block_on(launch(cli.config_file.as_deref(), &cli.command))?;
             std::process::exit(exit_code);
         }
     }
@@ -41,20 +45,39 @@ fn main() -> anyhow::Result<()> {
 
 /// Starts the repository's container and runs the shell, or `command`, in it
 /// as the host user; returns the exit code.
-async fn launch(command: &[String]) -> anyhow::Result<i32> {
+async fn launch(config_file: Option<&Path>, command: &[String]) -> anyhow::Result<i32> {
     ensure!(
         cfg!(target_env = "musl"),
         "vz mounts itself into the container, so it must be a static musl build: \
          cargo build --target x86_64-unknown-linux-musl"
     );
     let repo_root = repo::root()?;
-    let config = RepoConfig::load(&repo_root.join(REPO_CONFIG_FILE))?;
-    debug!("read {REPO_CONFIG_FILE}: {config:?}");
+    let config_file = match config_file {
+        Some(file) => {
+            std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?
+        }
+        None => repo_root.join(REPO_CONFIG_FILE),
+    };
+    let config = RepoConfig::load(&config_file)?;
+    debug!("read {}: {config:?}", config_file.display());
+    // Paths in the configuration are relative to its folder.
+    let config_dir = config_file.parent().unwrap_or(&repo_root).to_owned();
     let user = User::of_host()?;
     debug!("host user: {user:?}");
 
+    let state_dir = match &config.state_dir {
+        Some(dir) => config::resolve_host_path(dir, &config_dir, &user.home),
+        None => repo_root.join(DEFAULT_STATE_DIR),
+    };
+    let state = state::plan(&config.state, &user.home, &state_dir, &repo_root)?;
+    let state_targets: Vec<_> = state.iter().map(|mount| mount.target.clone()).collect();
+    let mounts = mounts::plan(&config.mounts, &user.home, &state_targets)?;
+    mounts::check_sources_exist(&mounts)?;
+
+    // Before anything is created on the host: a failed start leaves nothing.
     let engine = Engine::detect().await?;
-    let image = prepare_image(&engine, &config.image, &repo_root, &user).await?;
+    state::create_sources(&state)?;
+    let image = prepare_image(&engine, &config.image, &config_dir, &repo_root, &user).await?;
 
     let workdir = std::env::current_dir().context("reading the current directory")?;
     let vz_binary = std::env::current_exe().context("locating the vz binary")?;
@@ -64,6 +87,8 @@ async fn launch(command: &[String]) -> anyhow::Result<i32> {
         workdir: &workdir,
         vz_binary: &vz_binary,
         user: &user,
+        state: &state,
+        mounts: &mounts,
         passthrough: &passthrough_env(),
         command,
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -76,13 +101,14 @@ async fn launch(command: &[String]) -> anyhow::Result<i32> {
 async fn prepare_image(
     engine: &Engine,
     source: &ImageSource,
+    config_dir: &Path,
     repo_root: &Path,
     user: &User,
 ) -> anyhow::Result<String> {
     let (image, plan) = match source {
         ImageSource::Reference(reference) => (config::with_default_tag(reference), None),
         ImageSource::Build(spec) => {
-            let plan = BuildPlan::load(spec, repo_root, user)?;
+            let plan = BuildPlan::load(spec, config_dir, &repo::dir_name(repo_root), user)?;
             (plan.tag.clone(), Some(plan))
         }
     };

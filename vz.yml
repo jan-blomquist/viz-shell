@@ -1,2 +1,14 @@
 image:
   dockerfile: Dockerfile
+
+state:
+  # Crate downloads: the image keeps CARGO_HOME at /usr/local/cargo.
+  - /usr/local/cargo/registry
+  # Claude Code's folder, and its config file, which must start as valid JSON.
+  - ~/.claude
+  - { path: ~/.claude.json, type: file, init: "{}" }
+
+mounts:
+  # All repositories, read-only. This one stays read-write: the repository's
+  # own mount is deeper and lands on top.
+  - ~/repos

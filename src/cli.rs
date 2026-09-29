@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// One shell for every repo.
@@ -6,6 +8,11 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub internal: Option<Internal>,
+
+    /// The configuration to use instead of `vz.yml` at the git root. Paths in
+    /// it are relative to its folder.
+    #[arg(short = 'c', long)]
+    pub config_file: Option<PathBuf>,
 
     /// A command to run instead of the shell: `vz -- cargo test`
     #[arg(last = true)]
@@ -32,10 +39,15 @@ mod tests {
     }
 
     #[test]
-    fn parse__bare__is_shell() {
-        let cli = Cli::try_parse_from(["vz"]).unwrap();
+    fn parse__config_file_short_and_long__same_path() {
+        let short = Cli::try_parse_from(["vz", "-c", "examples/state/vz.yml"]).unwrap();
+        let long = Cli::try_parse_from(["vz", "--config-file", "examples/state/vz.yml"]).unwrap();
 
-        assert_eq!((cli.internal, cli.command), (None, vec![]));
+        let expected = Some(PathBuf::from("examples/state/vz.yml"));
+        assert_eq!(
+            (short.config_file, long.config_file),
+            (expected.clone(), expected)
+        );
     }
 
     #[test]

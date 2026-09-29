@@ -52,3 +52,13 @@ pub const HOME_ARG: &str = "VZ_HOME";
 
 /// Host variables copied into the container when set.
 pub const PASSTHROUGH_ENV: [&str; 4] = ["TERM", "COLORTERM", "LANG", LOG_ENV];
+
+/// Where state is kept unless `state_dir` says otherwise: this folder at the
+/// git root. Each state path is stored under it at its container path.
+pub const DEFAULT_STATE_DIR: &str = ".vz_state";
+
+/// A state path starting with this is under the home.
+pub const HOME_PREFIX: &str = "~/";
+
+/// The container's mount table, read by the entrypoint.
+pub const MOUNTINFO_FILE: &str = "/proc/self/mountinfo";
