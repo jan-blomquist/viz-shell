@@ -41,6 +41,22 @@ pub const CONTENT_HASH_LEN: usize = 16;
 /// Where the launcher mounts its own binary, and runs it as the entrypoint.
 pub const ENTRYPOINT_PATH: &str = "/run/viz-shell/viz-shell";
 
+/// A tmpfs, empty on every start: the entrypoint marks it once the user is
+/// set up, and an attach waits for the mark.
+pub const SESSION_DIR: &str = "/run/viz-shell/session";
+pub const READY_FILE: &str = "/run/viz-shell/session/ready";
+
+/// Containers are named `vz-<index>-<repository>[-<name>]`.
+pub const CONTAINER_PREFIX: &str = "vz-";
+
+/// The labels that identify a container: vz finds its containers by these.
+pub const REPO_LABEL: &str = "vz.repo";
+pub const INDEX_LABEL: &str = "vz.index";
+pub const NAME_LABEL: &str = "vz.name";
+pub const PROFILE_LABEL: &str = "vz.profile";
+pub const PERSISTENT_LABEL: &str = "vz.persistent";
+pub const CONFIG_LABEL: &str = "vz.config";
+
 /// The secure floor: every capability dropped but these, which only the
 /// container's root processes use. The entrypoint gives folders to the user,
 /// joins groups and becomes the user; the init, PID 1, forwards signals to

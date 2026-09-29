@@ -1,12 +1,25 @@
 use std::os::unix::process::ExitStatusExt;
-use std::process::ExitStatus;
+use std::path::Path;
+use std::process::{ExitStatus, Output};
 
 use anyhow::{Context, bail, ensure};
-use docker_wrapper::{DockerCommand, GenericCommand, InspectCommand, PullCommand, ensure_docker};
+use docker_wrapper::{
+    DockerCommand, GenericCommand, InspectCommand, PsCommand, PullCommand, RmCommand, StartCommand,
+    ensure_docker,
+};
 use tracing::{debug, info, instrument};
 
 use crate::build::BuildPlan;
-use crate::constants::DOCKER_CLI;
+use crate::constants::{DOCKER_CLI, REPO_LABEL};
+use crate::containers::{self, Container};
+
+/// What `docker create` did.
+#[derive(Debug, PartialEq)]
+pub enum Created {
+    Yes,
+    /// Another container has the name: one created meanwhile.
+    NameTaken,
+}
 
 /// The container engine, driven through the docker CLI. Only `detect`
 /// makes one, so every engine has passed its checks.
@@ -78,14 +91,115 @@ impl Engine {
         Ok(())
     }
 
-    /// Runs `docker` with `args` on this terminal and returns the container's
-    /// exit code. `env` goes into the docker CLI's own environment, where
-    /// `--env NAME` takes its values from.
-    #[instrument(skip_all)]
-    pub async fn run(&self, args: Vec<String>, env: &[(String, String)]) -> anyhow::Result<i32> {
-        let status = attached(args, env).await?;
-        Ok(exit_code(status))
+    /// The containers of the repository at `repo`, running or not; every
+    /// repository's with `None`. `docker ps` finds them by label, and
+    /// `docker inspect` describes them: its JSON is docker's own.
+    pub async fn containers(&self, repo: Option<&Path>) -> anyhow::Result<Vec<Container>> {
+        let filter = match repo {
+            Some(repo) => format!("label={REPO_LABEL}={}", repo.display()),
+            None => format!("label={REPO_LABEL}"),
+        };
+        let ids = PsCommand::new()
+            .all()
+            .quiet()
+            .filter(filter)
+            .execute()
+            .await
+            .context("listing containers")?
+            .container_ids();
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inspected = InspectCommand::new_multiple(ids)
+            .object_type("container")
+            .execute()
+            .await;
+        let json = match inspected {
+            Ok(output) => output.stdout,
+            // One removed since `docker ps` fails the call; the rest are there.
+            Err(docker_wrapper::Error::CommandFailed { stdout, .. }) if !stdout.is_empty() => {
+                stdout
+            }
+            Err(error) => return Err(error).context("inspecting containers"),
+        };
+        containers::parse_inspect(&json)
     }
+
+    /// `docker create` with `args`; `env` as for `exec`. Spawned directly:
+    /// docker-wrapper cannot hand the docker CLI an environment.
+    pub async fn create(
+        &self,
+        args: Vec<String>,
+        env: &[(String, String)],
+    ) -> anyhow::Result<Created> {
+        debug!("{DOCKER_CLI} {}", args.join(" "));
+        let output = captured(&args, env).await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() && stderr.contains("is already in use") {
+            return Ok(Created::NameTaken);
+        }
+        checked(output, "creating the container")?;
+        Ok(Created::Yes)
+    }
+
+    pub async fn start(&self, name: &str) -> anyhow::Result<()> {
+        StartCommand::new(name)
+            .execute()
+            .await
+            .with_context(|| format!("starting {name}"))?;
+        Ok(())
+    }
+
+    /// Starts the container on this terminal and returns its exit code.
+    #[instrument(skip(self))]
+    pub async fn start_attached(&self, name: &str) -> anyhow::Result<i32> {
+        let args = StartCommand::new(name)
+            .attach()
+            .interactive()
+            .build_command_args();
+        Ok(exit_code(attached(args, &[]).await?))
+    }
+
+    /// Runs `docker exec` with `args` on this terminal and returns the
+    /// command's exit code. `env` goes into the docker CLI's own environment,
+    /// where `--env NAME` takes its values from.
+    #[instrument(skip_all)]
+    pub async fn exec(&self, args: Vec<String>, env: &[(String, String)]) -> anyhow::Result<i32> {
+        Ok(exit_code(attached(args, env).await?))
+    }
+
+    /// Stops and removes the containers, and the shells attached to them.
+    pub async fn remove(&self, names: &[&str]) -> anyhow::Result<()> {
+        RmCommand::new_multiple(names.to_vec())
+            .force()
+            .execute()
+            .await
+            .context("removing containers")?;
+        Ok(())
+    }
+}
+
+/// Runs the docker CLI, capturing its output.
+async fn captured(
+    args: &[impl AsRef<std::ffi::OsStr>],
+    env: &[(String, String)],
+) -> anyhow::Result<Output> {
+    tokio::process::Command::new(DOCKER_CLI)
+        .args(args)
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .output()
+        .await
+        .with_context(|| format!("running {DOCKER_CLI}"))
+}
+
+/// The output's stdout, or its stderr as the error of `doing`.
+fn checked(output: Output, doing: &str) -> anyhow::Result<String> {
+    ensure!(
+        output.status.success(),
+        "{doing}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Runs the docker CLI on this terminal: docker-wrapper's own `execute`
@@ -128,13 +242,13 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs a docker engine"]
-    async fn run__hello_world__exits_zero() {
+    async fn exec__hello_world__exits_zero() {
         let engine = Engine::detect().await.unwrap();
         engine.pull("hello-world:latest").await.unwrap();
 
         let run = RunCommand::new("hello-world:latest").remove();
 
-        let exit_code = engine.run(run.build_command_args(), &[]).await.unwrap();
+        let exit_code = engine.exec(run.build_command_args(), &[]).await.unwrap();
 
         assert_eq!(exit_code, 0);
     }

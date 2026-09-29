@@ -60,6 +60,13 @@ pub struct Layer {
     /// path. Unset, or missing from the image: bash, else sh.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// The container outlives the shell that created it; `vz kill` removes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistent: Option<bool>,
+    /// A plain `vz` joins a container of this repository and profile, when
+    /// one runs or is kept, instead of creating another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach: Option<bool>,
     /// What of the host the shell shares.
     #[serde(default, skip_serializing_if = "Share::is_unset")]
     pub share: Share,
@@ -449,6 +456,8 @@ pub struct EffectiveConfig {
     pub state_dir: Option<String>,
     pub banner: bool,
     pub shell: Option<String>,
+    pub persistent: bool,
+    pub attach: bool,
     pub share: Shared,
     pub privileges: Granted,
     pub env: EffectiveEnv,
@@ -714,6 +723,8 @@ impl Layer {
             count(self.env.files.len(), "env file"),
             count(self.env.passthrough.len(), "passthrough"),
             switch(self.banner, "banner"),
+            switch(self.persistent, "persistent"),
+            switch(self.attach, "attach"),
         ]
         .into_iter()
         .flatten()
@@ -729,6 +740,8 @@ impl Layer {
             state_dir: over.state_dir.clone().or(self.state_dir),
             banner: over.banner.or(self.banner),
             shell: over.shell.clone().or(self.shell),
+            persistent: over.persistent.or(self.persistent),
+            attach: over.attach.or(self.attach),
             share: self.share.merge(&over.share),
             privileges: self.privileges.merge(&over.privileges),
             env: self.env.merge(&over.env),
@@ -852,6 +865,8 @@ impl EffectiveConfig {
             state_dir: layer.state_dir,
             banner: layer.banner.unwrap_or(false),
             shell: layer.shell,
+            persistent: layer.persistent.unwrap_or(false),
+            attach: layer.attach.unwrap_or(false),
             share: Shared {
                 docker: layer.share.docker.unwrap_or(false),
                 host_network: layer.share.host_network.unwrap_or(false),
@@ -961,6 +976,8 @@ impl EffectiveConfig {
             state_dir: self.state_dir.clone(),
             banner: self.banner.then_some(true),
             shell: self.shell.clone(),
+            persistent: self.persistent.then_some(true),
+            attach: self.attach.then_some(true),
             share: Share {
                 docker: self.share.docker.then_some(true),
                 host_network: self.share.host_network.then_some(true),
@@ -976,8 +993,59 @@ impl EffectiveConfig {
     }
 }
 
-/// The global configuration a first run writes: `templates/global.yml`.
-pub const DEFAULT_GLOBAL: &str = include_str!("../templates/global.yml");
+/// The global configuration a first run writes.
+pub const DEFAULT_GLOBAL: &str = r#"# The global configuration: what every repository starts from. viz-shell wrote
+# it on its first run and never overwrites it: edit it freely. A repository's own configuration comes on
+# top: its root over this root, its profiles over these of the same name.
+# Relative paths here are relative to this folder.
+
+# The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
+image: debian:stable-slim
+
+# A banner above an interactive shell, like fastfetch: the repository, branch,
+# profile, image, shell, and what the shell shares and may do. Never above
+# `vz -- command`.
+banner: true
+
+# The interactive shell for every repository: a name on the image's PATH, or an
+# absolute path. An image without it gives a warning, then bash, else sh.
+# shell: fish
+
+env:
+  files:
+    # Variables for every repository; skipped while the file does not exist.
+    - environment
+  passthrough:
+    - EDITOR
+
+# A mount must exist on the host, or vz refuses to start: uncomment what you have.
+# mounts:
+#   - ~/.gitconfig          # your git identity, read-only
+
+profiles:
+  # `vz --profile trusted`: for repositories you trust. A repository extends it
+  # with its own `trusted:`, or with `extends: trusted` in another profile.
+  trusted:
+    privileges:
+      # Root through sudo, with docker's default capabilities, instead of the
+      # secure floor, where the shell holds none. The image needs sudo.
+      sudo: true
+    share:
+      # The host's docker daemon: root-equivalent control of the host.
+      docker: true
+      # The host's network: its localhost and ports. Without it the shell still
+      # reaches the internet, through docker's network.
+      host_network: true
+    mounts:
+      # ssh as on the host: keys readable inside.
+      - ~/.ssh
+    env:
+      files:
+        # Secrets only trusted mode sees; skipped while the file does not exist.
+        - trusted.env
+      passthrough:
+        - GH_TOKEN
+"#;
 
 /// Writes the default global configuration when there is none; never
 /// overwrites. Returns whether it wrote.
@@ -1228,6 +1296,8 @@ mounts:
             state_dir: None,
             banner: false,
             shell: None,
+            persistent: false,
+            attach: false,
             share: Shared::default(),
             privileges: Granted::default(),
             env: EffectiveEnv::default(),
@@ -1330,6 +1400,33 @@ profiles:
             let message = error(&text);
 
             assert!(message.contains("absolute path"), "{shell}: {message}");
+        }
+    }
+
+    #[test]
+    fn effective__persistent_and_attach__off_unless_a_layer_turns_them_on() {
+        let text = "\
+image: debian
+profiles:
+  kept:
+    persistent: true
+  shared:
+    extends: kept
+    attach: true
+";
+        let cases = [
+            (None, (false, false)),
+            (Some("kept"), (true, false)),
+            (Some("shared"), (true, true)),
+        ];
+        for (profile, expected) in cases {
+            let config = effective(text, profile);
+
+            assert_eq!(
+                (config.persistent, config.attach),
+                expected,
+                "profile: {profile:?}"
+            );
         }
     }
 
@@ -1746,17 +1843,20 @@ mounts:
     }
 
     /// The recipes in `examples/`, the repository's own configuration and the
-    /// global template stay valid as the schema changes, with every profile.
-    /// A folder with neither kind of file is skipped.
+    /// global configuration a first run writes stay valid as the schema
+    /// changes, with every profile. A folder with neither kind of file is
+    /// skipped.
     #[test]
     fn load__every_example_and_the_repository_file__resolves_with_each_profile() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let home = Path::new("/home/sally");
+        let default_global = tempfile::tempdir().unwrap();
+        std::fs::write(default_global.path().join("global.yml"), DEFAULT_GLOBAL).unwrap();
         let examples = std::fs::read_dir(root.join("examples")).unwrap();
         let dirs: Vec<PathBuf> = examples
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.is_dir())
-            .chain([root.to_owned(), root.join("templates")])
+            .chain([root.to_owned(), default_global.path().to_owned()])
             .collect();
         for dir in dirs {
             let read = |file: Option<PathBuf>| {

@@ -1,6 +1,10 @@
 //! `vz entrypoint`: the container's first process. It starts as root, adds
 //! the host user to the image unless the image already has it, gives it its
-//! home, then becomes that user and replaces itself with the command.
+//! home, then becomes that user and replaces itself with the command; or, in
+//! a persistent container, holds it open for shells to attach.
+//!
+//! `vz enter`: an attached shell, through `docker exec`. It waits until the
+//! entrypoint is ready, then becomes the user the same way.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -9,21 +13,27 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use nix::unistd::{Gid, Uid, setgid, setgroups, setuid};
 use tracing::{debug, warn};
 
 use crate::constants::{
     GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE, MOUNTINFO_FILE,
-    PASSWD_FILE, SHELL_ENV, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
+    PASSWD_FILE, READY_FILE, SESSION_DIR, SHELL_ENV, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
 };
 use crate::user::{ExtraGroup, User, with_line};
 
-/// Returns only on failure; on success the command replaces this process.
-pub fn run(command: &[String]) -> anyhow::Result<()> {
+/// How long `enter` waits for the entrypoint's setup.
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_POLL: Duration = Duration::from_millis(20);
+
+/// Returns only on failure; on success the command replaces this process, or,
+/// with `hold`, this process holds the container open until it is stopped.
+pub fn run(command: &[String], hold: bool) -> anyhow::Result<()> {
     let user = User::from_env()?;
-    let extra_groups = ExtraGroup::parse_list(&std::env::var(GROUPS_ENV).unwrap_or_default())?;
+    let extra_groups = extra_groups()?;
     let shell = choose_shell()?;
     add_user(&user, &shell)?;
     add_extra_groups(&user, &extra_groups)?;
@@ -35,11 +45,62 @@ pub fn run(command: &[String]) -> anyhow::Result<()> {
     }
     prepare_home(&user)?;
     give_mount_parents(&user)?;
+    mark_ready()?;
 
-    become_user(&user, &extra_groups)?;
-    let mut process = user_command(&user, &shell, command);
+    if hold {
+        debug!("holding for shells to attach");
+        // Stopping the container signals this process, which then ends.
+        loop {
+            std::thread::park();
+        }
+    }
+    exec_as_user(&user, &extra_groups, &shell, command)
+}
+
+/// Returns only on failure; on success the command replaces this process.
+pub fn enter(command: &[String]) -> anyhow::Result<()> {
+    wait_ready()?;
+    let user = User::from_env()?;
+    let extra_groups = extra_groups()?;
+    let shell = choose_shell()?;
+    exec_as_user(&user, &extra_groups, &shell, command)
+}
+
+fn extra_groups() -> anyhow::Result<Vec<ExtraGroup>> {
+    ExtraGroup::parse_list(&std::env::var(GROUPS_ENV).unwrap_or_default())
+}
+
+fn exec_as_user(
+    user: &User,
+    extra_groups: &[ExtraGroup],
+    shell: &Path,
+    command: &[String],
+) -> anyhow::Result<()> {
+    become_user(user, extra_groups)?;
+    let mut process = user_command(user, shell, command);
     debug!("exec {process:?} as {}", user.name);
     Err(anyhow!(process.exec())).context("starting the command")
+}
+
+/// The session folder is a tmpfs, empty on every start: the mark is this
+/// start's.
+fn mark_ready() -> anyhow::Result<()> {
+    std::fs::create_dir_all(SESSION_DIR).with_context(|| format!("creating {SESSION_DIR}"))?;
+    std::fs::write(READY_FILE, "").with_context(|| format!("writing {READY_FILE}"))
+}
+
+fn wait_ready() -> anyhow::Result<()> {
+    let started = Instant::now();
+    while !Path::new(READY_FILE).exists() {
+        if started.elapsed() > READY_TIMEOUT {
+            bail!(
+                "the container's entrypoint has not set it up after {}s; see `docker logs` for it",
+                READY_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(READY_POLL);
+    }
+    Ok(())
 }
 
 fn add_user(user: &User, shell: &Path) -> anyhow::Result<()> {
@@ -225,17 +286,15 @@ fn choose_shell() -> anyhow::Result<PathBuf> {
         .ok()
         .filter(|shell| !shell.is_empty());
     let search_path = std::env::var("PATH").unwrap_or_default();
-    let exists = |path: &Path| path.is_file();
     if let Some(shell) = wanted
         .as_deref()
-        .and_then(|name| find_program(name, &search_path, exists))
+        .and_then(|name| find_program(name, &search_path))
     {
         return Ok(shell);
     }
     let fallback = SHELLS
         .iter()
-        .map(PathBuf::from)
-        .find(|shell| exists(shell))
+        .find_map(|shell| find_program(shell, &search_path))
         .with_context(|| format!("the image has none of {}", SHELLS.join(", ")))?;
     if let Some(wanted) = wanted {
         warn!(
@@ -247,17 +306,10 @@ fn choose_shell() -> anyhow::Result<PathBuf> {
     Ok(fallback)
 }
 
-/// An absolute path as it is, a name in the first `search_path` folder that
-/// has it; `None` if missing.
-fn find_program(name: &str, search_path: &str, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    if name.starts_with('/') {
-        return Some(PathBuf::from(name)).filter(|path| exists(path));
-    }
-    search_path
-        .split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| Path::new(dir).join(name))
-        .find(|path| exists(path))
+/// An executable: an absolute path as it is, a name in the first
+/// `search_path` folder that has it; `None` if missing.
+fn find_program(name: &str, search_path: &str) -> Option<PathBuf> {
+    which::which_in(name, Some(search_path), "/").ok()
 }
 
 fn read(path: &str) -> anyhow::Result<String> {
@@ -309,22 +361,38 @@ mod tests {
     }
 
     #[test]
-    fn find_program__name_or_path__found_where_it_exists() {
-        let present = ["/usr/local/bin/fish", "/usr/bin/fish", "/bin/zsh"];
-        let exists = |path: &Path| present.iter().any(|p| Path::new(p) == path);
-        let search_path = "/usr/local/sbin:/usr/local/bin:/usr/bin::/bin";
+    fn find_program__name_or_path__an_executable_where_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let (local, usr, bin) = (dir("local"), dir("usr"), dir("bin"));
+        let file = |dir: &Path, name: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let local_fish = file(&local, "fish", 0o755);
+        let usr_fish = file(&usr, "fish", 0o755);
+        let zsh = file(&bin, "zsh", 0o755);
+        let not_executable = file(&bin, "nu", 0o644);
+        let search_path = format!("{}:{}::{}", local.display(), usr.display(), bin.display());
         let cases = [
-            ("fish", Some("/usr/local/bin/fish")),
-            ("zsh", Some("/bin/zsh")),
-            ("/usr/bin/fish", Some("/usr/bin/fish")),
+            ("fish", Some(&local_fish)),
+            ("zsh", Some(&zsh)),
+            (usr_fish.to_str().unwrap(), Some(&usr_fish)),
             ("nu", None),
-            ("/usr/bin/zsh", None),
+            (not_executable.to_str().unwrap(), None),
+            ("bash", None),
         ];
 
         for (name, expected) in cases {
             assert_eq!(
-                find_program(name, search_path, exists),
-                expected.map(PathBuf::from),
+                find_program(name, &search_path).as_ref(),
+                expected,
                 "{name}"
             );
         }
