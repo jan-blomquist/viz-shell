@@ -27,7 +27,7 @@ use crate::config::{Config, ImageSource, Layer};
 use crate::constants::{
     DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV,
     GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV, HOME_ENV, LOG_ENV,
-    MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SUDO_ENV, UID_ENV, USER_ENV,
+    MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::engine::Engine;
 use crate::env::CliEnv;
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         // Before any runtime starts: the entrypoint changes user and execs,
         // which wants a single-threaded process.
         Some(Action::Entrypoint { command }) => entrypoint::run(command),
-        Some(Action::Profiles) => print_profiles(&load()?),
+        Some(Action::Profiles) => print_profiles(&load_with(cli.config_file.as_deref())?),
         None => {
             let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
             let exit_code = runtime.block_on(launch(&cli))?;
@@ -114,10 +114,6 @@ fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
     })
 }
 
-fn load() -> anyhow::Result<Loaded> {
-    load_with(None)
-}
-
 /// `$XDG_CONFIG_HOME/viz-shell/global.yml`, or under `~/.config` without it.
 fn global_config_file(home: &Path) -> PathBuf {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
@@ -149,7 +145,7 @@ fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
     let files = [("global", &loaded.global_file), ("repo", &loaded.repo_file)];
     let rows = files.into_iter().filter_map(|(origin, file)| {
         let file = file.as_ref()?;
-        Some([origin.to_owned(), tilde(file, &loaded.user.home)])
+        Some([origin.to_owned(), config::tilde(file, &loaded.user.home)])
     });
     print_table(["FROM", "FILE"], rows);
     Ok(())
@@ -170,14 +166,6 @@ fn print_table<const N: usize>(header: [&str; N], rows: impl IntoIterator<Item =
             .map(|(cell, width)| format!("{cell:width$}"))
             .collect();
         println!("{}", cells.join("   ").trim_end());
-    }
-}
-
-/// A path under the home as `~/…`.
-fn tilde(path: &Path, home: &Path) -> String {
-    match path.strip_prefix(home) {
-        Ok(below) => format!("~/{}", below.display()),
-        Err(_) => path.display().to_string(),
     }
 }
 
@@ -206,7 +194,11 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
     }
     debug!("effective configuration: {config:?}");
     let Loaded {
-        repo_root, user, ..
+        repo_root,
+        user,
+        global_file,
+        repo_file,
+        ..
     } = loaded;
     // Paths are absolute by now; the repository root is the base of the rest.
     let config_dir = repo_root.clone();
@@ -273,17 +265,36 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         sudo: config.privileges.sudo,
         host_network: config.share.host_network,
+        shell: config.shell.as_deref(),
     };
     if config.banner && cli.command.is_empty() && session.tty {
+        let branch = repo::branch(&repo_root);
+        let config_files: Vec<&Path> = [&global_file, &repo_file]
+            .into_iter()
+            .flatten()
+            .map(PathBuf::as_path)
+            .collect();
+        let facts = banner::Session {
+            user: &user.name,
+            home: &user.home,
+            repo_root: &repo_root,
+            branch: branch.as_deref(),
+            config_files: &config_files,
+            profile: cli.profile.as_deref(),
+            image: &image,
+            shell: config.shell.as_deref(),
+            sudo: config.privileges.sudo,
+            docker: docker.as_ref().map(|socket| socket.path.as_path()),
+            host_network: config.share.host_network,
+            mounts: &mounts,
+            state_paths: state.len(),
+            state_dir: &state_dir,
+            env_vars: environment.len(),
+        };
+        let color = std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
         print!(
             "{}",
-            banner::render(&banner::Status {
-                repo: &repo::dir_name(&repo_root),
-                profile: cli.profile.as_deref(),
-                sudo: config.privileges.sudo,
-                docker: config.share.docker,
-                host_network: config.share.host_network,
-            })
+            banner::render(&banner::title(&facts), &banner::facts(&facts), color)
         );
     }
     let values: Vec<(String, String)> = environment
@@ -304,6 +315,7 @@ fn reserved_env_names() -> Vec<&'static str> {
         GROUPS_ENV,
         DOCKER_HOST_ENV,
         SUDO_ENV,
+        SHELL_ENV,
     ]
     .into_iter()
     .chain(PASSTHROUGH_ENV)

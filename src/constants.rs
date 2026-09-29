@@ -41,10 +41,12 @@ pub const CONTENT_HASH_LEN: usize = 16;
 /// Where the launcher mounts its own binary, and runs it as the entrypoint.
 pub const ENTRYPOINT_PATH: &str = "/run/viz-shell/viz-shell";
 
-/// The secure floor: every capability dropped but these three, which the
-/// entrypoint needs at start (to give folders to the user, join groups, and
-/// become the user). Becoming the user clears them; its processes hold none.
-pub const FLOOR_CAPABILITIES: [&str; 3] = ["CHOWN", "SETUID", "SETGID"];
+/// The secure floor: every capability dropped but these, which only the
+/// container's root processes use. The entrypoint gives folders to the user,
+/// joins groups and becomes the user; the init, PID 1, forwards signals to
+/// the user's processes, and exits if it cannot. Becoming the user clears
+/// them: its processes hold none.
+pub const FLOOR_CAPABILITIES: [&str; 4] = ["CHOWN", "SETUID", "SETGID", "KILL"];
 
 /// On the floor, setuid programs such as sudo or su gain nothing.
 pub const NO_NEW_PRIVILEGES: &str = "no-new-privileges";
@@ -69,8 +71,12 @@ pub const HOSTNAME_FILE: &str = "/proc/sys/kernel/hostname";
 pub const HOSTNAME_ADDRESS: &str = "127.0.1.1";
 pub const GROUP_FILE: &str = "/etc/group";
 
-/// The shell when no command is given: the first of these the image has.
+/// The shell when no command is given and `shell` is unset or missing from
+/// the image: the first of these the image has.
 pub const SHELLS: [&str; 2] = ["/bin/bash", "/bin/sh"];
+
+/// Tells the entrypoint the configured `shell`.
+pub const SHELL_ENV: &str = "VZ_SHELL";
 
 /// The host user, carried into the container for the entrypoint.
 pub const USER_ENV: &str = "VZ_USER";

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use docker_wrapper::{DockerCommand, RunCommand};
 
 use crate::constants::{
-    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SUDO_ENV,
+    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SHELL_ENV, SUDO_ENV,
 };
 use crate::mounts::HostMount;
 use crate::share::DockerSocket;
@@ -39,6 +39,8 @@ pub struct Session<'a> {
     pub sudo: bool,
     /// `share.host_network`: the host's network stack.
     pub host_network: bool,
+    /// `shell`: the entrypoint looks it up in the image.
+    pub shell: Option<&'a str>,
 }
 
 impl Session<'_> {
@@ -78,6 +80,9 @@ impl Session<'_> {
         }
         if self.host_network {
             run = run.network("host");
+        }
+        if let Some(shell) = self.shell {
+            run = run.env(SHELL_ENV, shell);
         }
         run = match self.sudo {
             true => run.env(SUDO_ENV, "1"),
@@ -213,6 +218,16 @@ mod tests {
     }
 
     fn args_with(command: &[String], tty: bool, sudo: bool, host_network: bool) -> Vec<String> {
+        args_configured(command, tty, sudo, host_network, |_| {})
+    }
+
+    fn args_configured(
+        command: &[String],
+        tty: bool,
+        sudo: bool,
+        host_network: bool,
+        configure: impl FnOnce(&mut Session),
+    ) -> Vec<String> {
         let user = sally();
         let state = [StateMount {
             source: PathBuf::from(
@@ -233,7 +248,7 @@ mod tests {
         };
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
         let env_names = ["GH_TOKEN".to_owned()];
-        let session = Session {
+        let mut session = Session {
             image: "vz-vz:abc",
             repo_root: Path::new("/home/sally/repos/vz"),
             workdir: Path::new("/home/sally/repos/vz/src"),
@@ -248,7 +263,9 @@ mod tests {
             tty,
             sudo,
             host_network,
+            shell: None,
         };
+        configure(&mut session);
         session.run_args()
     }
 
@@ -395,7 +412,7 @@ mod tests {
         let args = args_for(&[], false);
 
         assert!(has(&args, "--cap-drop", "ALL"), "{args:?}");
-        for capability in ["CHOWN", "SETUID", "SETGID"] {
+        for capability in ["CHOWN", "SETUID", "SETGID", "KILL"] {
             assert!(
                 has(&args, "--cap-add", capability),
                 "{capability}: {args:?}"
@@ -417,6 +434,20 @@ mod tests {
         assert!(
             !args.iter().any(|arg| floor.contains(&arg.as_str())),
             "{args:?}"
+        );
+    }
+
+    #[test]
+    fn run_args__shell__the_entrypoint_told_only_when_set() {
+        let fish = args_configured(&[], false, false, false, |session| {
+            session.shell = Some("fish")
+        });
+        let unset = args_with(&[], false, false, false);
+
+        assert!(has(&fish, "--env", "VZ_SHELL=fish"), "{fish:?}");
+        assert!(
+            !unset.iter().any(|arg| arg.starts_with("VZ_SHELL")),
+            "{unset:?}"
         );
     }
 

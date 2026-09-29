@@ -36,6 +36,19 @@ pub fn config_file(root: &Path) -> Option<PathBuf> {
     Some(root.join(chosen))
 }
 
+/// The branch checked out at `root`; `None` on a detached HEAD, or if git fails.
+pub fn branch(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["symbolic-ref", "--short", "-q", "HEAD"])
+        .output()
+        .ok()?;
+    let branch = String::from_utf8(output.stdout).ok()?;
+    Some(branch.trim_end().to_owned())
+        .filter(|branch| output.status.success() && !branch.is_empty())
+}
+
 pub fn dir_name(root: &Path) -> String {
     root.file_name()
         .map(|name| name.to_string_lossy().into_owned())

@@ -2,7 +2,7 @@
 # The development image for this repository: the Rust toolchain pinned in
 # rust-toolchain.toml, vz built from this checkout, and what `just examples`
 # needs to run inside vz: the docker CLI, git, just, ssh for git over ssh, and
-# sudo for the trusted profile.
+# sudo for the trusted profile; fish as the shell.
 
 # Every tool is pinned to an exact version: the image's content hash then
 # names one toolset, on every machine that builds it.
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM toolchain
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client sudo \
+ && apt-get install -y --no-install-recommends fish git openssh-client sudo \
  && rm -rf /var/lib/apt/lists/*
 # Static binaries: the CLI talks to the host's daemon through the shared socket.
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

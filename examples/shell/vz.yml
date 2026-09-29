@@ -1,0 +1,21 @@
+# The interactive shell: a name on the image's PATH, or an absolute path. One
+# the image lacks gives a warning, and bash, else sh.
+image:
+  dockerfile: Dockerfile
+
+shell: fish
+
+# fish's configuration and history, kept with the repository's state rather
+# than taken from the host.
+state:
+  - ~/.config/fish
+  - ~/.local/share/fish
+
+profiles:
+  # Not in the image: a warning, then sh.
+  missing:
+    shell: zsh
+
+  # An absolute path, used as it is.
+  absolute:
+    shell: /usr/bin/fish
