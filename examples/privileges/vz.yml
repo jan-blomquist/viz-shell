@@ -1,0 +1,16 @@
+# Privileges: by default the shell runs on the secure floor, holding no
+# capabilities, and setuid programs such as sudo gain nothing. A profile
+# grants sudo: root through sudo, with docker's default capabilities.
+image:
+  dockerfile: Dockerfile
+
+profiles:
+  trusted:
+    privileges:
+      sudo: true
+
+  # sudo granted, but the image has none: a warning, and the shell starts.
+  no-sudo-image:
+    image: debian:stable-slim
+    privileges:
+      sudo: true

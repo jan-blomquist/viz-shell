@@ -41,10 +41,32 @@ pub const CONTENT_HASH_LEN: usize = 16;
 /// Where the launcher mounts its own binary, and runs it as the entrypoint.
 pub const ENTRYPOINT_PATH: &str = "/run/viz-shell/viz-shell";
 
+/// The secure floor: every capability dropped but these three, which the
+/// entrypoint needs at start (to give folders to the user, join groups, and
+/// become the user). Becoming the user clears them; its processes hold none.
+pub const FLOOR_CAPABILITIES: [&str; 3] = ["CHOWN", "SETUID", "SETGID"];
+
+/// On the floor, setuid programs such as sudo or su gain nothing.
+pub const NO_NEW_PRIVILEGES: &str = "no-new-privileges";
+
+/// Tells the entrypoint that `privileges.sudo` is granted.
+pub const SUDO_ENV: &str = "VZ_SUDO";
+
+/// Where the entrypoint grants the user sudo, and where it looks for sudo.
+pub const SUDOERS_FILE: &str = "/etc/sudoers.d/viz-shell";
+pub const SUDO_BINARIES: [&str; 3] = ["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"];
+
 /// The entrypoint starts as root to add the host user, then becomes that user.
 pub const CONTAINER_ROOT: &str = "0:0";
 
 pub const PASSWD_FILE: &str = "/etc/passwd";
+pub const HOSTS_FILE: &str = "/etc/hosts";
+
+/// The container's hostname: the host's own with `share.host_network`.
+pub const HOSTNAME_FILE: &str = "/proc/sys/kernel/hostname";
+
+/// Where a hostname missing from the hosts file resolves, as Debian does.
+pub const HOSTNAME_ADDRESS: &str = "127.0.1.1";
 pub const GROUP_FILE: &str = "/etc/group";
 
 /// The shell when no command is given: the first of these the image has.

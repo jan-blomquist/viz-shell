@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use docker_wrapper::{DockerCommand, RunCommand};
 
-use crate::constants::{CONTAINER_ROOT, ENTRYPOINT_PATH};
+use crate::constants::{
+    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SUDO_ENV,
+};
 use crate::mounts::HostMount;
 use crate::share::DockerSocket;
 use crate::state::StateMount;
@@ -32,6 +34,11 @@ pub struct Session<'a> {
     pub command: &'a [String],
     /// Whether stdin and stdout are a terminal.
     pub tty: bool,
+    /// `privileges.sudo`: docker's default capabilities and sudo, instead of
+    /// the secure floor.
+    pub sudo: bool,
+    /// `share.host_network`: the host's network stack.
+    pub host_network: bool,
 }
 
 impl Session<'_> {
@@ -69,6 +76,18 @@ impl Session<'_> {
         if self.tty {
             run = run.tty();
         }
+        if self.host_network {
+            run = run.network("host");
+        }
+        run = match self.sudo {
+            true => run.env(SUDO_ENV, "1"),
+            false => FLOOR_CAPABILITIES
+                .into_iter()
+                .fold(run.cap_drop("ALL"), |run, capability| {
+                    run.cap_add(capability)
+                })
+                .security_opt(NO_NEW_PRIVILEGES),
+        };
         let docker_env = self.docker.map(DockerSocket::env).into_iter().flatten();
         let env: Vec<(String, String)> = self
             .user
@@ -190,6 +209,10 @@ mod tests {
     }
 
     fn args_for(command: &[String], tty: bool) -> Vec<String> {
+        args_with(command, tty, false, false)
+    }
+
+    fn args_with(command: &[String], tty: bool, sudo: bool, host_network: bool) -> Vec<String> {
         let user = sally();
         let state = [StateMount {
             source: PathBuf::from(
@@ -223,6 +246,8 @@ mod tests {
             env_names: &env_names,
             command,
             tty,
+            sudo,
+            host_network,
         };
         session.run_args()
     }
@@ -363,6 +388,45 @@ mod tests {
             "{args:?}"
         );
         assert!(has(&args, "--env", "VZ_GROUPS=docker:969"), "{args:?}");
+    }
+
+    #[test]
+    fn run_args__default__secure_floor() {
+        let args = args_for(&[], false);
+
+        assert!(has(&args, "--cap-drop", "ALL"), "{args:?}");
+        for capability in ["CHOWN", "SETUID", "SETGID"] {
+            assert!(
+                has(&args, "--cap-add", capability),
+                "{capability}: {args:?}"
+            );
+        }
+        assert!(
+            has(&args, "--security-opt", "no-new-privileges"),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg == "VZ_SUDO=1"), "{args:?}");
+    }
+
+    #[test]
+    fn run_args__sudo__docker_defaults_and_the_entrypoint_told() {
+        let args = args_with(&[], false, true, false);
+
+        assert!(has(&args, "--env", "VZ_SUDO=1"), "{args:?}");
+        let floor = ["--cap-drop", "--cap-add", "--security-opt"];
+        assert!(
+            !args.iter().any(|arg| floor.contains(&arg.as_str())),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn run_args__host_network__the_hosts_network_else_dockers() {
+        let shared = args_with(&[], false, false, true);
+        let default = args_with(&[], false, false, false);
+
+        assert!(has(&shared, "--network", "host"), "{shared:?}");
+        assert!(!default.iter().any(|arg| arg == "--network"), "{default:?}");
     }
 
     #[test]

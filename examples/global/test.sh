@@ -42,4 +42,5 @@ expect_output "a profile in both files: the global section, then the repo's" "re
     run_vz --profile trusted -- sh -c 'echo "$WHO $TRUSTED_SECRET"'
 expect_output "a repository profile extends a global one" "s3cret" \
     run_vz --profile ci -- sh -c 'echo "$TRUSTED_SECRET"'
-expect_contains "vz profiles lists where each is defined" "trusted  global, repo" run_vz profiles
+expect_contains "vz profiles lists where each is defined" "trusted   global, repo" run_vz profiles
+expect_contains "vz profiles lists what each extends" "ci        repo           trusted" run_vz profiles

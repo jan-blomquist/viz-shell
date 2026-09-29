@@ -13,6 +13,7 @@ Linux first, shell first, no editor required
 - [State](#state)
 - [Mounts](#mounts)
 - [Share](#share)
+- [Privileges](#privileges)
 - [Environment](#environment)
 - [Profiles](#profiles)
 - [Global configuration](#global-configuration)
@@ -50,6 +51,20 @@ that is removed on exit; `vz` exits with its exit code. Inside:
 - the repository is mounted read-write at its host path; the working directory is yours;
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
 - `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set.
+
+`banner: true` prints the viz-shell banner above an interactive shell (never above `vz -- command`):
+
+```
+       _              _          _ _
+__   _(_)____     ___| |__   ___| | |
+\ \ / / |_  /____/ __| '_ \ / _ \ | |
+ \ V /| |/ /_____\__ \ | | |  __/ | |
+  \_/ |_/___|    |___/_| |_|\___|_|_|
+
+  vz | profile: trusted | sudo: yes | docker: yes | host network: yes
+```
+
+The global template turns it on; `banner: false` in a repository or profile turns it off.
 
 Unknown keys in `vz.yml` are refused, naming the line.
 
@@ -163,16 +178,36 @@ What of the host the shell shares; nothing unless a layer turns it on.
 
 ```yaml
 share:
-  docker: true   # the host's docker daemon
+  docker: true         # the host's docker daemon
+  host_network: true   # the host's network stack
 ```
 
 - `docker`: the socket behind the current docker endpoint (it follows `DOCKER_HOST` and
   `docker context use`) is mounted at its own path, `DOCKER_HOST` points at it, and you join its
   group: docker works inside as you, without sudo. The image needs the docker CLI.
 - Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
-- `false` in a profile turns it off: `share: { docker: false }`.
+- `host_network`: `--network host`, the host's network stack, its `localhost` and its ports. Without
+  it the shell still reaches the internet, through docker's own network, but not the host's `localhost`.
+  It gives no root, but the shell reaches every service the host does, and its ports can clash.
+- `false` in a profile turns either off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
   repository (`target/…/release/viz-shell`); another is refused.
+
+## Privileges
+
+What the shell may do inside; nothing beyond the secure floor unless a layer grants it.
+
+```yaml
+privileges:
+  sudo: true      # root through sudo; the image needs sudo
+```
+
+- The secure floor, by default: every Linux capability dropped, `no-new-privileges` set. The
+  entrypoint keeps `CHOWN`, `SETUID` and `SETGID` just long enough to set you up; once it becomes you,
+  the shell holds no capabilities, and setuid programs such as `sudo` or `su` gain nothing.
+- `sudo: true`: docker's default capabilities, no `no-new-privileges`, and a password-less sudoers
+  line for you. An image without sudo gets a warning, and the shell starts without it.
+- The global template grants it in its `trusted` profile; `false` in a profile takes it back.
 
 ## Environment
 
@@ -231,7 +266,7 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 - An entry is a bare path or name for the common case, or expanded for anything else.
 - An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
   a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
-- Settings (`image`, `state_dir`, `share`) are replaced; `env.defaults` merges per variable name.
+- Settings (`image`, `state_dir`, `banner`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
@@ -241,7 +276,8 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 `~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
 configuration, and every repository starts from it. The first `vz` writes it from
 [`templates/global.yml`](templates/global.yml) when there is none, and never overwrites it: an untrusted
-default and a `trusted` profile with docker, `~/.ssh` and trusted-only secrets. Edit it freely.
+default with the banner on, and a `trusted` profile with sudo, docker, the host's network, `~/.ssh` and trusted-only
+secrets. Edit it freely.
 
 - A repository without a configuration runs from the global one alone.
 - Layers, later wins: global root, repository root, then for the chosen profile and each it extends
@@ -263,8 +299,7 @@ default and a `trusted` profile with docker, `~/.ssh` and trusted-only secrets. 
 Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, which can name any host
 file or share the docker daemon. Review a repository's configuration as you would its code. What
 protects the host is what reaches the container: only the repository, and what the configuration
-shares or mounts. The secure floor inside the container (capabilities dropped, no new privileges)
-comes with the `privileges` work.
+shares, mounts or grants; and, unless `privileges.sudo` is granted, the secure floor inside it.
 
 ## Examples
 
@@ -282,6 +317,8 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 | [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight |
 | [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
+| [`privileges`](examples/privileges) | the secure floor by default; sudo in a profile; an image without sudo |
+| [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default |
 
 ## Logging
 

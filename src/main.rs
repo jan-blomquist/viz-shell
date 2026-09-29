@@ -1,3 +1,4 @@
+mod banner;
 mod build;
 mod cli;
 mod config;
@@ -26,7 +27,7 @@ use crate::config::{Config, ImageSource, Layer};
 use crate::constants::{
     DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV,
     GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV, HOME_ENV, LOG_ENV,
-    MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, UID_ENV, USER_ENV,
+    MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::engine::Engine;
 use crate::env::CliEnv;
@@ -125,27 +126,59 @@ fn global_config_file(home: &Path) -> PathBuf {
     config_home.join(GLOBAL_CONFIG_DIR).join(GLOBAL_CONFIG_FILE)
 }
 
-/// Each profile with the files that define it: global, then repo.
+/// Each profile: the files that define it, what it extends and changes;
+/// then the configuration files read.
 fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
-    println!("# profiles of {}", loaded.files_line());
     let profiles = loaded.config.profiles();
-    let width = profiles
-        .iter()
-        .map(|profile| profile.name.len())
-        .max()
-        .unwrap_or(0);
-    for profile in profiles {
-        let extends = profile
-            .extends
-            .map(|name| format!("  extends {name}"))
-            .unwrap_or_default();
-        println!(
-            "{:width$}  {}{extends}",
-            profile.name,
-            profile.defined_in.join(", ")
-        );
+    if profiles.is_empty() {
+        println!("No profiles yet: add them under `profiles:` in either file.");
+    } else {
+        let rows = profiles.into_iter().map(|profile| {
+            [
+                profile.name,
+                profile.defined_in.join(", "),
+                profile.extends.unwrap_or_else(|| "-".to_owned()),
+                Some(profile.changes.join(", "))
+                    .filter(|changes| !changes.is_empty())
+                    .unwrap_or_else(|| "-".to_owned()),
+            ]
+        });
+        print_table(["PROFILE", "FROM", "EXTENDS", "CHANGES"], rows);
     }
+    println!();
+    let files = [("global", &loaded.global_file), ("repo", &loaded.repo_file)];
+    let rows = files.into_iter().filter_map(|(origin, file)| {
+        let file = file.as_ref()?;
+        Some([origin.to_owned(), tilde(file, &loaded.user.home)])
+    });
+    print_table(["FROM", "FILE"], rows);
     Ok(())
+}
+
+/// Rows under a header, in columns as wide as their widest cell, like `docker ps`.
+fn print_table<const N: usize>(header: [&str; N], rows: impl IntoIterator<Item = [String; N]>) {
+    let rows: Vec<[String; N]> = std::iter::once(header.map(str::to_owned))
+        .chain(rows)
+        .collect();
+    let widths: Vec<usize> = (0..N)
+        .map(|column| rows.iter().map(|row| row[column].len()).max().unwrap_or(0))
+        .collect();
+    for row in rows {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:width$}"))
+            .collect();
+        println!("{}", cells.join("   ").trim_end());
+    }
+}
+
+/// A path under the home as `~/…`.
+fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(below) => format!("~/{}", below.display()),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 /// Starts the repository's container and runs the shell, or `command`, in it
@@ -238,7 +271,21 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
         env_names: &environment.keys().cloned().collect::<Vec<_>>(),
         command: &cli.command,
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        sudo: config.privileges.sudo,
+        host_network: config.share.host_network,
     };
+    if config.banner && cli.command.is_empty() && session.tty {
+        print!(
+            "{}",
+            banner::render(&banner::Status {
+                repo: &repo::dir_name(&repo_root),
+                profile: cli.profile.as_deref(),
+                sudo: config.privileges.sudo,
+                docker: config.share.docker,
+                host_network: config.share.host_network,
+            })
+        );
+    }
     let values: Vec<(String, String)> = environment
         .into_iter()
         .map(|(name, var)| (name, var.value))
@@ -256,6 +303,7 @@ fn reserved_env_names() -> Vec<&'static str> {
         HOME_ENV,
         GROUPS_ENV,
         DOCKER_HOST_ENV,
+        SUDO_ENV,
     ]
     .into_iter()
     .chain(PASSTHROUGH_ENV)

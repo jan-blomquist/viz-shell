@@ -35,6 +35,8 @@ pub struct ProfileInfo {
     /// `global`, `repo`, or both, in that order.
     pub defined_in: Vec<&'static str>,
     pub extends: Option<String>,
+    /// What its sections change, in a few words each: `sudo`, `2 mounts`, …
+    pub changes: Vec<String>,
 }
 
 /// One layer of configuration: the root of `vz.yml`, or a profile. Every
@@ -51,9 +53,16 @@ pub struct Layer {
     /// absolute. Unset: `.vz_state` at the git root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<String>,
+    /// The viz-shell banner above an interactive shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<bool>,
     /// What of the host the shell shares.
     #[serde(default, skip_serializing_if = "Share::is_unset")]
     pub share: Share,
+    /// What the shell may do inside: nothing beyond the secure floor unless
+    /// a layer grants it.
+    #[serde(default, skip_serializing_if = "Privileges::is_unset")]
+    pub privileges: Privileges,
     /// Environment variables inside the container.
     #[serde(default, skip_serializing_if = "Env::is_unset")]
     pub env: Env,
@@ -122,16 +131,46 @@ pub struct Share {
     /// The host's docker daemon: its socket, joined through its group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker: Option<bool>,
+    /// The host's network stack, instead of docker's own network: the
+    /// host's `localhost` and ports. Without it the shell still reaches the
+    /// internet, through docker's network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_network: Option<bool>,
 }
 
 impl Share {
     fn is_unset(&self) -> bool {
-        self.docker.is_none()
+        *self == Share::default()
     }
 
     fn merge(&self, over: &Share) -> Share {
         Share {
             docker: over.docker.or(self.docker),
+            host_network: over.host_network.or(self.host_network),
+        }
+    }
+}
+
+/// What the shell may do inside the container: a fixed set, so a misspelt
+/// key is refused. Each is off unless a layer grants it; off, the container
+/// runs on the secure floor.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Privileges {
+    /// Root through sudo: docker's default capabilities instead of none, and
+    /// a sudoers line for the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sudo: Option<bool>,
+}
+
+impl Privileges {
+    fn is_unset(&self) -> bool {
+        self.sudo.is_none()
+    }
+
+    fn merge(&self, over: &Privileges) -> Privileges {
+        Privileges {
+            sudo: over.sudo.or(self.sudo),
         }
     }
 }
@@ -404,7 +443,9 @@ pub struct EffectiveConfig {
     pub layers: Vec<String>,
     pub image: ImageSource,
     pub state_dir: Option<String>,
+    pub banner: bool,
     pub share: Shared,
+    pub privileges: Granted,
     pub env: EffectiveEnv,
     pub state: Vec<StateEntry>,
     pub mounts: Vec<MountEntry>,
@@ -414,6 +455,13 @@ pub struct EffectiveConfig {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Shared {
     pub docker: bool,
+    pub host_network: bool,
+}
+
+/// What the shell may do inside.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Granted {
+    pub sudo: bool,
 }
 
 /// The environment's sources, settled: no removed entries, values as text.
@@ -500,6 +548,11 @@ impl Config {
                     .map(|(origin, _)| origin)
                     .collect(),
                 extends: self.extends(&name).map(str::to_owned),
+                changes: self
+                    .files()
+                    .filter_map(|(_, file)| file.profiles.get(&name))
+                    .fold(Layer::default(), |base, section| base.merge(section))
+                    .changes(),
                 name,
             })
             .collect()
@@ -626,6 +679,40 @@ impl Layer {
         Ok(())
     }
 
+    /// What this layer changes, in a few words each, for `vz profiles`.
+    fn changes(&self) -> Vec<String> {
+        let switch = |on: Option<bool>, name: &str| {
+            on.map(|on| match on {
+                true => name.to_owned(),
+                false => format!("no {name}"),
+            })
+        };
+        let count = |entries: usize, what: &str| match entries {
+            0 => None,
+            1 => Some(format!("1 {what}")),
+            _ => Some(format!("{entries} {what}s")),
+        };
+        let image = self.image.as_ref().map(|image| match image {
+            ImageSource::Reference(reference) => format!("image {reference}"),
+            ImageSource::Build(_) => "its own image".to_owned(),
+        });
+        [
+            image,
+            switch(self.privileges.sudo, "sudo"),
+            switch(self.share.docker, "docker"),
+            switch(self.share.host_network, "host network"),
+            count(self.mounts.len(), "mount"),
+            count(self.state.len(), "state path"),
+            count(self.env.defaults.len(), "env default"),
+            count(self.env.files.len(), "env file"),
+            count(self.env.passthrough.len(), "passthrough"),
+            switch(self.banner, "banner"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// `over` on top of `self`: its fields where set, its entries per key.
     /// The result is a plain layer: no `extends`, no profiles.
     fn merge(self, over: &Layer) -> Layer {
@@ -633,7 +720,9 @@ impl Layer {
             extends: None,
             image: over.image.clone().or(self.image),
             state_dir: over.state_dir.clone().or(self.state_dir),
+            banner: over.banner.or(self.banner),
             share: self.share.merge(&over.share),
+            privileges: self.privileges.merge(&over.privileges),
             env: self.env.merge(&over.env),
             state: merge_keyed(&self.state, &over.state),
             mounts: merge_keyed(&self.mounts, &over.mounts),
@@ -732,8 +821,13 @@ impl EffectiveConfig {
             layers: Vec::new(),
             image,
             state_dir: layer.state_dir,
+            banner: layer.banner.unwrap_or(false),
             share: Shared {
                 docker: layer.share.docker.unwrap_or(false),
+                host_network: layer.share.host_network.unwrap_or(false),
+            },
+            privileges: Granted {
+                sudo: layer.privileges.sudo.unwrap_or(false),
             },
             env: EffectiveEnv::resolve(layer.env),
             state,
@@ -835,8 +929,13 @@ impl EffectiveConfig {
         Layer {
             image: Some(self.image.clone()),
             state_dir: self.state_dir.clone(),
+            banner: self.banner.then_some(true),
             share: Share {
                 docker: self.share.docker.then_some(true),
+                host_network: self.share.host_network.then_some(true),
+            },
+            privileges: Privileges {
+                sudo: self.privileges.sudo.then_some(true),
             },
             env: self.env.to_env(),
             state,
@@ -1096,7 +1195,9 @@ mounts:
             ],
             image: ImageSource::Reference("alpine".to_owned()),
             state_dir: None,
+            banner: false,
             share: Shared::default(),
+            privileges: Granted::default(),
             env: EffectiveEnv::default(),
             state: vec![state("~/scratch", StateKind::Dir, None)],
             mounts: vec![],
@@ -1126,6 +1227,76 @@ profiles:
         for (text, profile, expected) in cases {
             assert_eq!(
                 effective(text, profile).share.docker,
+                expected,
+                "profile: {profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective__sudo__off_unless_a_profile_grants_it() {
+        let text = "\
+image: debian
+profiles:
+  trusted:
+    privileges: { sudo: true }
+  locked:
+    extends: trusted
+    privileges: { sudo: false }
+";
+        let cases = [
+            (None, false),
+            (Some("trusted"), true),
+            (Some("locked"), false),
+        ];
+        for (profile, expected) in cases {
+            assert_eq!(
+                effective(text, profile).privileges.sudo,
+                expected,
+                "profile: {profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse__unknown_privilege__is_refused_naming_it() {
+        let text = "image: debian\nprivileges:\n  root: true\n";
+
+        assert!(error(text).contains("root"), "{}", error(text));
+    }
+
+    #[test]
+    fn effective__banner__off_unless_a_layer_turns_it_on() {
+        let text = "\
+image: debian
+banner: true
+profiles:
+  quiet:
+    banner: false
+";
+        let cases = [(None, true), (Some("quiet"), false)];
+        for (profile, expected) in cases {
+            assert_eq!(
+                effective(text, profile).banner,
+                expected,
+                "profile: {profile:?}"
+            );
+        }
+        assert!(!effective("image: debian\n", None).banner);
+    }
+
+    #[test]
+    fn effective__share_host_network__off_unless_a_layer_turns_it_on() {
+        let text = "\
+image: debian
+profiles:
+  trusted:
+    share: { host_network: true }
+";
+        let cases = [(None, false), (Some("trusted"), true)];
+        for (profile, expected) in cases {
+            assert_eq!(
+                effective(text, profile).share.host_network,
                 expected,
                 "profile: {profile:?}"
             );
@@ -1695,16 +1866,24 @@ profiles:
                 name: "ci".to_owned(),
                 defined_in: vec!["repo"],
                 extends: Some("trusted".to_owned()),
+                changes: vec![],
             },
             ProfileInfo {
                 name: "trusted".to_owned(),
                 defined_in: vec!["global", "repo"],
                 extends: None,
+                // The global section's docker and file, the repo section's default.
+                changes: vec![
+                    "docker".to_owned(),
+                    "1 env default".to_owned(),
+                    "1 env file".to_owned(),
+                ],
             },
             ProfileInfo {
                 name: "work".to_owned(),
                 defined_in: vec!["global"],
                 extends: None,
+                changes: vec!["1 env default".to_owned()],
             },
         ];
         assert_eq!(profiles, expected);
