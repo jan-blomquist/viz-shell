@@ -65,3 +65,13 @@ pub const HOME_PREFIX: &str = "~/";
 
 /// The container's mount table, read by the entrypoint.
 pub const MOUNTINFO_FILE: &str = "/proc/self/mountinfo";
+
+/// Inside, the docker CLI finds the shared socket through this.
+pub const DOCKER_HOST_ENV: &str = "DOCKER_HOST";
+pub const UNIX_SOCKET_SCHEME: &str = "unix://";
+
+/// Extra groups the entrypoint makes the user join, as `name:gid`, comma-separated.
+pub const GROUPS_ENV: &str = "VZ_GROUPS";
+
+/// The docker socket's group name when the host has no name for its gid.
+pub const DOCKER_GROUP_NAME: &str = "docker";

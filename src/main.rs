@@ -7,6 +7,7 @@ mod entrypoint;
 mod mounts;
 mod repo;
 mod session;
+mod share;
 mod state;
 mod user;
 
@@ -22,10 +23,12 @@ use crate::build::BuildPlan;
 use crate::cli::{Cli, Internal};
 use crate::config::{ImageSource, RepoConfig};
 use crate::constants::{
-    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, LOG_ENV, PASSTHROUGH_ENV, REPO_CONFIG_FILE,
+    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, ENTRYPOINT_PATH, LOG_ENV, PASSTHROUGH_ENV,
+    REPO_CONFIG_FILE,
 };
 use crate::engine::Engine;
 use crate::session::Session;
+use crate::share::DockerSocket;
 use crate::user::User;
 
 fn main() -> anyhow::Result<()> {
@@ -89,13 +92,20 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
     let mounts = mounts::plan(&config.mounts, &user.home, &state_targets)?;
     mounts::check_sources_exist(&mounts)?;
 
+    let vz_binary = std::env::current_exe().context("locating the vz binary")?;
+    let inside_vz = Path::new(ENTRYPOINT_PATH).exists();
+    session::check_binary_reachable(inside_vz, &vz_binary, &repo_root)?;
+
     // Before anything is created on the host: a failed start leaves nothing.
     let engine = Engine::detect().await?;
+    let docker = match config.share.docker {
+        true => Some(DockerSocket::locate(&engine.docker_endpoint().await?)?),
+        false => None,
+    };
     state::create_sources(&state)?;
     let image = prepare_image(&engine, &config.image, &config_dir, &repo_root, &user).await?;
 
     let workdir = std::env::current_dir().context("reading the current directory")?;
-    let vz_binary = std::env::current_exe().context("locating the vz binary")?;
     let session = Session {
         image: &image,
         repo_root: &repo_root,
@@ -104,6 +114,7 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
         user: &user,
         state: &state,
         mounts: &mounts,
+        docker: docker.as_ref(),
         passthrough: &passthrough_env(),
         command: &cli.command,
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),

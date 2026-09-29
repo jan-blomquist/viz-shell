@@ -16,9 +16,11 @@ fi
 
 # docker keeps its real configuration: contexts, plugins, logins.
 export DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
-# ~ in vz.yml lands in a throwaway home, never in the real one. The path is
-# fixed per example, so an image that bakes the home stays cached between runs.
-export HOME=${TMPDIR:-/tmp}/vz-examples/$example/home
+# ~ in vz.yml lands in a throwaway home, never in the real one. It lives in
+# the repository, so it has the same path inside a vz container and on the
+# host, whose daemon mounts it. The path is fixed per example, so an image
+# that bakes the home stays cached between runs.
+export HOME=$repo_root/target/vz-examples/$example/home
 rm -rf "$HOME" && mkdir -p "$HOME"
 # Every run starts with no state.
 rm -rf "$example_dir/.vz_state"
@@ -31,6 +33,13 @@ echo "$example"
 
 # inside COMMAND...: runs COMMAND in a container of this example.
 inside() { "$vz_bin" -c "$example_dir/vz.yml" -- "$@"; }
+
+# with_profile NAME COMMAND...: runs COMMAND in a container of this example's profile NAME.
+with_profile() {
+    local name=$1
+    shift
+    "$vz_bin" -c "$example_dir/vz.yml" --profile "$name" -- "$@"
+}
 
 pass() { printf '  \e[32m✓\e[0m %s\n' "$1"; }
 

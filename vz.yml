@@ -12,3 +12,8 @@ mounts:
   # All repositories, read-only. This one stays read-write: the repository's
   # own mount is deeper and lands on top.
   ~/repos: ro
+
+share:
+  # The host's docker daemon: `vz -- just examples` runs the example tests
+  # from inside vz.
+  docker: true

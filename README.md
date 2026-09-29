@@ -12,6 +12,7 @@ Linux first, shell first, no editor required
 - [Your user in the image](#your-user-in-the-image)
 - [State](#state)
 - [Mounts](#mounts)
+- [Share](#share)
 - [Profiles](#profiles)
 - [Examples](#examples)
 - [Logging](#logging)
@@ -145,6 +146,23 @@ mounts:                # keyed by host path
 - A mount must exist on the host; `vz` never creates one.
 - Paths follow the state rules; a mount may not overlap a state path.
 
+## Share
+
+What of the host the shell shares; nothing unless a layer turns it on.
+
+```yaml
+share:
+  docker: true   # the host's docker daemon
+```
+
+- `docker`: the socket behind the current docker endpoint (it follows `DOCKER_HOST` and
+  `docker context use`) is mounted at its own path, `DOCKER_HOST` points at it, and you join its
+  group: docker works inside as you, without sudo. The image needs the docker CLI.
+- Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
+- `false` in a profile turns it off: `profiles: { offline: { share: { docker: false } } }`.
+- `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
+  repository (`target/…/release/vz`); another is refused.
+
 ## Profiles
 
 Named layers on top of the root of `vz.yml`, each with the same keys. Choose one with
@@ -182,6 +200,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`state`](examples/state) | folders, a file with `init`, absolute paths |
 | [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file |
 | [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
+| [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 
 ## Logging
 
@@ -195,8 +214,9 @@ VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, o
 ## Test
 
 Build first (`just build`); the example tests run `target/.../release/vz`, or `$VZ`.
-Each runs with a throwaway `HOME` (`/tmp/vz-examples/<example>/home`), so `~` never touches yours,
-and starts with an empty `.vz_state/`.
+Each runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches yours,
+and starts with an empty `.vz_state/`. This repository shares docker, so everything runs inside `vz`
+too: `vz -- just build examples`.
 
 ```sh
 just test                  # unit tests, no engine needed

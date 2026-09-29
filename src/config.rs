@@ -29,6 +29,9 @@ pub struct Layer {
     /// absolute. Unset: `.vz_state` at the git root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<String>,
+    /// What of the host the shell shares.
+    #[serde(default, skip_serializing_if = "Share::is_unset")]
+    pub share: Share,
     /// Keyed by container path.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateValue>,
@@ -41,6 +44,28 @@ pub struct Layer {
     /// Root only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Layer>,
+}
+
+/// What of the host the shell may share: a fixed set, so a misspelt key is
+/// refused. Each is off unless a layer turns it on.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Share {
+    /// The host's docker daemon: its socket, joined through its group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docker: Option<bool>,
+}
+
+impl Share {
+    fn is_unset(&self) -> bool {
+        self.docker.is_none()
+    }
+
+    fn merge(&self, over: &Share) -> Share {
+        Share {
+            docker: over.docker.or(self.docker),
+        }
+    }
 }
 
 /// Where the image comes from: a reference to pull, or a Dockerfile to build.
@@ -115,8 +140,15 @@ pub enum MountMode {
 pub struct EffectiveConfig {
     pub image: ImageSource,
     pub state_dir: Option<String>,
+    pub share: Shared,
     pub state: Vec<StateEntry>,
     pub mounts: Vec<MountEntry>,
+}
+
+/// What the shell shares with the host.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shared {
+    pub docker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +253,7 @@ impl Layer {
         Layer {
             image: over.image.clone().or(self.image),
             state_dir: over.state_dir.clone().or(self.state_dir),
+            share: self.share.merge(&over.share),
             state,
             mounts,
             extends: None,
@@ -279,6 +312,9 @@ impl EffectiveConfig {
         Ok(Self {
             image,
             state_dir: layer.state_dir,
+            share: Shared {
+                docker: layer.share.docker.unwrap_or(false),
+            },
             state,
             mounts,
         })
@@ -315,6 +351,9 @@ impl EffectiveConfig {
         Layer {
             image: Some(self.image.clone()),
             state_dir: self.state_dir.clone(),
+            share: Share {
+                docker: self.share.docker.then_some(true),
+            },
             state,
             mounts,
             ..Layer::default()
@@ -516,6 +555,7 @@ state:
         let expected = EffectiveConfig {
             image: ImageSource::Reference("alpine".to_owned()),
             state_dir: None,
+            share: Shared::default(),
             state: vec![state("~/scratch", StateKind::Dir, None)],
             mounts: vec![],
         };
@@ -524,7 +564,8 @@ state:
 
     #[test]
     fn to_yaml__effective_configuration__parses_back_to_itself() {
-        let config = effective(BASE, Some("writable"));
+        let text = format!("{BASE}share:\n  docker: true\n");
+        let config = effective(&text, Some("writable"));
 
         let yaml = config.to_yaml().unwrap();
 
@@ -541,6 +582,41 @@ state:
             yaml.contains("~/.a: dir") && yaml.contains("~/b: ro"),
             "{yaml}"
         );
+    }
+
+    #[test]
+    fn effective__share_docker__off_unless_a_layer_turns_it_on() {
+        let text = "\
+image: debian
+share:
+  docker: true
+profiles:
+  offline:
+    share: { docker: false }
+  again:
+    extends: offline
+    share: { docker: true }
+";
+        let cases = [
+            ("image: debian\n", None, false),
+            (text, None, true),
+            (text, Some("offline"), false),
+            (text, Some("again"), true),
+        ];
+        for (text, profile, expected) in cases {
+            assert_eq!(
+                effective(text, profile).share.docker,
+                expected,
+                "profile: {profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse__unknown_share__is_refused_naming_it() {
+        let text = "image: debian\nshare:\n  dcoker: true\n";
+
+        assert!(error(text).contains("dcoker"), "{}", error(text));
     }
 
     #[test]
