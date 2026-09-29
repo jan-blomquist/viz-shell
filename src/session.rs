@@ -147,7 +147,7 @@ pub fn check_binary_reachable(
     anyhow::ensure!(
         !inside_vz || vz_binary.starts_with(repo_root),
         "inside a vz container, run a vz built in the repository (such as \
-         target/x86_64-unknown-linux-musl/release/vz): the host's docker mounts \
+         target/x86_64-unknown-linux-musl/release/viz-shell): the host's docker mounts \
          {} from the host, where it does not exist",
         vz_binary.display()
     );
@@ -200,7 +200,7 @@ mod tests {
             image: "vz-vz:abc",
             repo_root: Path::new("/home/sally/repos/vz"),
             workdir: Path::new("/home/sally/repos/vz/src"),
-            vz_binary: Path::new("/home/sally/.cargo/bin/vz"),
+            vz_binary: Path::new("/home/sally/.local/bin/viz-shell"),
             user: &user,
             state: &state,
             mounts: &mounts,
@@ -233,7 +233,7 @@ mod tests {
             has(
                 &args,
                 "--mount",
-                "type=bind,src=/home/sally/.cargo/bin/vz,dst=/run/vz/vz,readonly"
+                "type=bind,src=/home/sally/.local/bin/viz-shell,dst=/run/viz-shell/viz-shell,readonly"
             ),
             "{args:?}"
         );
@@ -258,7 +258,10 @@ mod tests {
         let args = args_for(&[], true);
 
         assert!(has(&args, "--user", "0:0"), "{args:?}");
-        assert!(has(&args, "--entrypoint", "/run/vz/vz"), "{args:?}");
+        assert!(
+            has(&args, "--entrypoint", "/run/viz-shell/viz-shell"),
+            "{args:?}"
+        );
         assert!(
             has(&args, "--workdir", "/home/sally/repos/vz/src"),
             "{args:?}"
@@ -351,12 +354,13 @@ mod tests {
     #[test]
     fn check_binary_reachable__cases() {
         let repo = Path::new("/home/sally/repos/vz");
-        let built = Path::new("/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/vz");
+        let built =
+            Path::new("/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/viz-shell");
         let cases = [
-            (false, Path::new("/run/vz/vz"), true),
+            (false, Path::new("/run/viz-shell/viz-shell"), true),
             (true, built, true),
-            (true, Path::new("/run/vz/vz"), false),
-            (true, Path::new("/usr/local/bin/vz"), false),
+            (true, Path::new("/run/viz-shell/viz-shell"), false),
+            (true, Path::new("/usr/local/bin/viz-shell"), false),
         ];
         for (inside_vz, binary, reachable) in cases {
             let result = check_binary_reachable(inside_vz, binary, repo);

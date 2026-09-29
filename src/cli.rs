@@ -6,13 +6,13 @@ use crate::constants::PROFILE_ENV;
 
 /// One shell for every repo.
 #[derive(Debug, Parser)]
-#[command(name = "vz", version, args_conflicts_with_subcommands = true)]
+#[command(name = "viz-shell", version, args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub internal: Option<Internal>,
 
-    /// The configuration to use instead of `vz.yml` at the git root. Paths in
-    /// it are relative to its folder.
+    /// The configuration to use instead of the one at the git root
+    /// (viz-shell.yml, …, vz.yaml). Paths in it are relative to its folder.
     #[arg(short = 'c', long)]
     pub config_file: Option<PathBuf>,
 

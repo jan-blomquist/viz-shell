@@ -23,7 +23,8 @@ Linux first, shell first, no editor required
 ## Build
 
 ```sh
-cargo build --release    # → target/x86_64-unknown-linux-musl/release/vz
+just build      # → target/x86_64-unknown-linux-musl/release/viz-shell
+just install    # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
 ```
 
 Rust 1.95.0 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
@@ -39,7 +40,8 @@ vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
 vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
 ```
 
-`vz` reads `vz.yml` at the git root, or the `-c` file, pulls or builds the image if missing, and runs a container
+`vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
+`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or builds the image if missing, and runs a container
 that is removed on exit; `vz` exits with its exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
@@ -167,7 +169,7 @@ share:
 - Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
 - `false` in a profile turns it off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
-  repository (`target/…/release/vz`); another is refused.
+  repository (`target/…/release/viz-shell`); another is refused.
 
 ## Environment
 
@@ -249,16 +251,16 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 
 ## Logging
 
-Stderr, filtered by `VZ_LOG` (default `warn,vz=info,docker_wrapper=error`):
+Stderr, filtered by `VZ_LOG` (default `warn,viz_shell=info,docker_wrapper=error`):
 
 ```sh
-VZ_LOG=vz=debug vz    # each step, and every docker command in full
+VZ_LOG=viz_shell=debug vz    # each step, and every docker command in full
 VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, output size
 ```
 
 ## Test
 
-Build first (`just build`); the example tests run `target/.../release/vz`, or `$VZ`.
+Build first (`just build`); the example tests run `target/.../release/viz-shell`, or `$VZ`.
 Each runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches yours,
 and starts with an empty `.vz_state/`. This repository shares docker, so everything runs inside `vz`
 too: `vz -- just build examples`.

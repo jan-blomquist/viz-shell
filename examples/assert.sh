@@ -8,7 +8,7 @@ set -euo pipefail
 example_dir=$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)
 example=$(basename "$example_dir")
 repo_root=$(cd "$example_dir/../.." && pwd)
-vz_bin=${VZ:-$repo_root/target/x86_64-unknown-linux-musl/release/vz}
+vz_bin=${VZ:-$repo_root/target/x86_64-unknown-linux-musl/release/viz-shell}
 if [[ ! -x $vz_bin ]]; then
     echo "no vz binary at $vz_bin: run cargo build --release, or set VZ" >&2
     exit 1

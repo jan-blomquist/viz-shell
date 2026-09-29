@@ -38,7 +38,7 @@ expect_contains "--show-env names each source" "env.files $HOME/example.env" sho
 expect_lacks "and never a value" "secret-value" show_env
 
 logged_command() {
-    env VZ_EXAMPLE_TOKEN=secret-value VZ_LOG=vz=debug "${vz[@]}" -- true 2>&1 >/dev/null
+    env VZ_EXAMPLE_TOKEN=secret-value VZ_LOG=viz_shell=debug "${vz[@]}" -- true 2>&1 >/dev/null
 }
 expect_contains "docker gets the name" "--env VZ_EXAMPLE_TOKEN" logged_command
 expect_lacks "never the value" "secret-value" logged_command

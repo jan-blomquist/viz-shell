@@ -25,7 +25,7 @@ use crate::cli::{Cli, Internal};
 use crate::config::{ImageSource, RepoConfig};
 use crate::constants::{
     DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GROUP_ENV,
-    GROUPS_ENV, HOME_ENV, LOG_ENV, PASSTHROUGH_ENV, REPO_CONFIG_FILE, UID_ENV, USER_ENV,
+    GROUPS_ENV, HOME_ENV, LOG_ENV, PASSTHROUGH_ENV, UID_ENV, USER_ENV,
 };
 use crate::engine::Engine;
 use crate::env::CliEnv;
@@ -61,7 +61,7 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
         Some(file) => {
             std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?
         }
-        None => repo_root.join(REPO_CONFIG_FILE),
+        None => repo::config_file(&repo_root)?,
     };
     let config = RepoConfig::load(&config_file)?
         .effective(cli.profile.as_deref())
