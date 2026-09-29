@@ -3,6 +3,11 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 binary := "target/x86_64-unknown-linux-musl/release/viz-shell"
 bin_dir := env_var("HOME") / ".local/bin"
 
+# The base images in images/: where they will be published, and their version.
+# Bump the version with every change to them, and the FROM lines that name it.
+images_registry := "ghcr.io/jan-blomquist"
+images_version := "2026.9.1"
+
 default:
     @just --list
 
@@ -19,6 +24,14 @@ install suffix="2":
     ln -sfn viz-shell{{suffix}} {{bin_dir}}/vz{{suffix}}
     @echo "installed {{bin_dir}}/viz-shell{{suffix}}, alias {{bin_dir}}/vz{{suffix}}"
     @case ":$PATH:" in *":{{bin_dir}}:"*) ;; *) echo "note: {{bin_dir}} is not on PATH" >&2 ;; esac
+
+# viz-shell-base first, then viz-shell-agents from it. A Dockerfile's FROM finds
+# them without a pull.
+# Build the base images in images/ locally, under their published names.
+build-base-images:
+    docker build -t {{images_registry}}/viz-shell-base:{{images_version}} images/base
+    docker build -t {{images_registry}}/viz-shell-agents:{{images_version}} \
+        --build-arg BASE={{images_registry}}/viz-shell-base:{{images_version}} images/agents
 
 # Unit tests: no engine needed.
 test:

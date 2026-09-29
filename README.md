@@ -1,12 +1,115 @@
-# viz-shell
-One shell for every repo. A vz.yml at the repo root declares image, mounts, state, environment, 
-capabilities and sidecars; a host file declares what it grants. 
-One static Rust binary applies both to a Docker or Podman container, on a laptop, an agent host or a CI runner. 
-Linux first, shell first, no editor required
+<p align="center">
+  <img src="assets/vz-logo.png" alt="vz" width="420">
+</p>
 
-> Early MVP: `vz` opens a shell, as you, in the image `vz.yml` names, with the repository mounted.
+<h3 align="center">One shell for every repo.</h3>
 
-- [Build](#build)
+<p align="center">
+  Versatile dev environments, everywhere, exactly as you want them.<br>
+  As yourself, in any image, secure by default, and made for coding agents.
+</p>
+
+<p align="center">
+  <a href="#license"><img alt="License: MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue"></a>
+  <img alt="Rust 1.95+" src="https://img.shields.io/badge/rust-1.95%2B-orange">
+  <img alt="Linux" src="https://img.shields.io/badge/platform-linux-lightgrey">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#why-vz">Why vz</a> ·
+  <a href="#guide">Guide</a> ·
+  <a href="#examples">Examples</a>
+</p>
+
+---
+
+```console
+$ whoami
+sally
+$ vz
+sally@vz-0-app:~/repos/app$ whoami
+sally
+```
+
+Describe a repository's environment in a few lines of YAML. `vz` starts it in a container and drops
+you in: as yourself, in your repository, with only what you chose to share. On a laptop, a server or
+a CI runner, for you and for the agents working beside you.
+
+> **Status:** young and moving fast. It works day to day, but the configuration may still change
+> before 1.0. Feedback and issues are welcome.
+
+## Why vz
+
+- **Your repo, mounted.** `cd` into any git repository and type `vz`. The repository is there,
+  read-write, at the same path as on your host.
+- **You, inside.** Same user, uid, groups, home and paths. Files you create stay yours; git and ssh
+  just work; paths in errors match your editor's.
+- **Any image.** Official images work unchanged, or `vz` builds the repository's own Dockerfile.
+  Switch branches, switch environments; nothing rebuilds needlessly.
+- **Profiles.** Your defaults in one global file, the project's in the repository, modes on top:
+  `vz --profile trusted` for sudo and docker, `ci` for the pipeline.
+- **Secure by default, made for agents.** No Linux capabilities, no sudo, no docker, no host network,
+  no secrets, unless you grant them. Let an agent loose: of your machine, it reaches the repository
+  and nothing else.
+- **State that stays.** Caches, shell history and agent sessions survive the container, per
+  repository, and never clutter your home.
+- **Secrets out of sight.** Env files are read on the host and pass by name: never on a command line,
+  never in a log.
+- **Sessions.** Name a container, keep it, attach from any terminal: `vz new api`, `vz at api`.
+- **One static binary.** No daemon, no runtime, no editor plugin. Just Docker.
+
+## Quick start
+
+Releases, with a one-line install script, are on the way. Until then, build from source (needs
+[Rust](https://rustup.rs) and [just](https://just.systems)):
+
+```sh
+git clone https://github.com/jan-blomquist/viz-shell && cd viz-shell
+just build && just install ""      # ~/.local/bin/viz-shell, and its alias vz
+```
+
+In any git repository, name an image, then run `vz`:
+
+```yaml
+# viz-shell.yml
+image: rust:1.98.1-slim-trixie
+```
+
+The first run also writes `~/.config/viz-shell/global.yml`: your defaults for every repository, with
+a `trusted` profile that grants sudo, docker and the host's network when you ask for it.
+
+A fuller configuration:
+
+```yaml
+image:
+  dockerfile: Dockerfile               # FROM ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1
+shell: fish
+state:                                 # survives the container, kept in .vz_state/
+  - /usr/local/cargo/registry
+  - ~/.local/share/opencode
+mounts:
+  - ~/repos                            # read-only; this repository stays read-write
+env:
+  files: [.env]                        # read on the host, never mounted
+  passthrough: [GH_TOKEN]
+profiles:
+  trusted:                             # vz --profile trusted
+    privileges: { sudo: true }
+    share: { docker: true }
+```
+
+## How vz differs
+
+- **Not an editor plugin.** Dev Containers center on the editor; vz is shell-first. Use it with any
+  editor, or none, over ssh, on a server, in CI.
+- **Not a package manager.** Nix and Devbox assemble packages; vz runs whatever image you give it,
+  and builds your Dockerfile when you give it one.
+- **Not host integration.** Distrobox and Toolbox deliberately share your home and your host; vz
+  isolates by default and shares only what the configuration declares.
+
+## Guide
+
 - [Use](#use)
 - [Sessions](#sessions)
 - [Images](#images)
@@ -20,19 +123,8 @@ Linux first, shell first, no editor required
 - [Global configuration](#global-configuration)
 - [Examples](#examples)
 - [Logging](#logging)
-- [Test](#test)
+- [Development](#development)
 - [License](#license)
-
-## Build
-
-```sh
-just build      # → target/x86_64-unknown-linux-musl/release/viz-shell
-just install    # → ~/.local/bin/viz-shell2, and the alias ~/.local/bin/vz2
-just install "" # → viz-shell and vz, once the legacy viz-shell no longer holds those names
-```
-
-Rust 1.95.0 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
-because `vz` mounts itself into every container it starts: build it anywhere, run it on any Linux host.
 
 ## Use
 
@@ -50,8 +142,9 @@ vz kill 0 api       # removes containers; --all for all of this repository's
 ```
 
 `vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
-`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or builds the image if missing, and runs a container,
-removed on exit unless `persistent`; `vz` exits with the shell's, or the command's, exit code. Inside:
+`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or
+builds the image if missing, and runs a container, removed on exit unless `persistent`; `vz` exits
+with the shell's, or the command's, exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
@@ -80,7 +173,7 @@ __   _(_)____     ___| |__   ___| | |   --------------
                                         Env: 3 variables
 ```
 
-The global template turns it on; `banner: false` in a repository or profile turns it off.
+The default global configuration turns it on; `banner: false` in a repository or profile turns it off.
 
 `shell` picks the interactive shell: a name on the image's `PATH`, or an absolute path. It is also
 `$SHELL` and your login shell inside. An image without it gives a warning, then bash, else sh, so a
@@ -143,7 +236,36 @@ image:                        # build; paths relative to the vz.yml's folder
   Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
 - Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
   so `.dockerignore` applies.
-- This repository's `Dockerfile`: the Rust toolchain, with `vz` built from the checkout.
+- This repository's `Dockerfile`: `viz-shell-agents` (below), plus the Rust toolchain and `vz` built
+  from the checkout. Run `just build-base-images` once before its first `vz`.
+
+**What an image needs.** Official images like `debian`, `alpine`, `rust`, `node` or `python` already
+meet the contract. For your own images:
+
+- a shell: `bash`, else `sh`, or the one `shell` names;
+- tools under `/usr/local` or `/opt`, not in a home, so the image serves every user and `state`
+  mounts in your home cannot shadow them;
+- no reliance on an `ENTRYPOINT` (vz runs its own) or on a baked user (vz adds you);
+- `sudo`, if a profile grants `privileges.sudo`.
+
+**Base images.** [`images/`](images) holds two images to start from, pinned to exact versions.
+They are not published yet: `just build-base-images` builds them locally, under the names they will
+be published as, where a `FROM` finds them:
+
+| Image | Adds |
+|---|---|
+| `ghcr.io/jan-blomquist/viz-shell-base:2026.9.1` | Debian, git, ssh, fish, tmux, ripgrep, jq, sudo, the docker CLI, just |
+| `ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1` | the base, plus Node, uv and Python, and the coding agents Claude Code, opencode, codex, pi, openspec |
+
+A repository inherits one and adds what it needs; vz knows nothing of either:
+
+```dockerfile
+FROM ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1
+COPY --from=ghcr.io/getzola/zola:v0.22.1 /bin/zola /usr/local/bin/zola
+```
+
+Pin a version, never a moving tag: a new base is then an edit to the `FROM`, which changes the
+image's hash, so the repository rebuilds on that branch, and only there.
 
 ## Your user in the image
 
@@ -295,7 +417,8 @@ vz --show-env                   # every name and where it comes from, never a va
 - `defaults` is a map, keyed by variable name: a profile overrides per name, `null` removes one.
   `files` and `passthrough` are lists: expanded forms `{ path, required, enabled }` and `{ name, enabled }`.
 - An env file tracked by git is refused: its values would be in the repository's history.
-- Values reach the container by name (`docker run --env NAME`), never on a command line or in a log;
+- Values reach the container by name (`docker create --env NAME`, and `docker exec` when attaching),
+  never on a command line or in a log;
   `--show-effective-config` and `--show-env` never print a value from a file or the host.
   `docker inspect` of the container still shows them, as for any container environment.
 - `vz` sets `HOME`, `VZ_*`, `TERM`, `COLORTERM`, `LANG` and, when docker is shared, `DOCKER_HOST` itself;
@@ -325,7 +448,8 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 - An entry is a bare path or name for the common case, or expanded for anything else.
 - An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
   a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
-- Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
+- Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`) are replaced; `share` and
+  `privileges` per key, `env.defaults` per variable name.
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
@@ -333,10 +457,10 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 ## Global configuration
 
 `~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
-configuration, and every repository starts from it. The first `vz` writes it from
-its built-in default (`DEFAULT_GLOBAL` in [`src/config.rs`](src/config.rs)) when there is none, and never overwrites it: an untrusted
-default with the banner on, and a `trusted` profile with sudo, docker, the host's network, `~/.ssh` and trusted-only
-secrets. Edit it freely.
+configuration, and every repository starts from it. The first `vz` writes it from its built-in
+default (`DEFAULT_GLOBAL` in [`src/config.rs`](src/config.rs)) when there is none, and never
+overwrites it: an untrusted default with the banner on, and a `trusted` profile with sudo, docker,
+the host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
 
 - A repository without a configuration runs from the global one alone.
 - Layers, later wins: global root, repository root, then for the chosen profile and each it extends
@@ -390,7 +514,17 @@ VZ_LOG=viz_shell=debug vz    # each step, and every docker command in full
 VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, output size
 ```
 
-## Test
+## Development
+
+```sh
+just build                # → target/x86_64-unknown-linux-musl/release/viz-shell
+just install ""           # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
+just install              # → viz-shell2 and vz2, beside another vz you still use
+just build-base-images    # → the images in images/, built locally
+```
+
+Rust 1.98.1 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
+because `vz` mounts itself into every container it starts: build it anywhere, run it on any Linux host.
 
 Build first (`just build`); the example tests run `target/.../release/viz-shell`, or `$VZ`.
 Each runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches yours,
@@ -402,6 +536,8 @@ just test                  # unit tests, no engine needed
 just examples              # every example's test.sh, against the built vz; needs docker
 just example state         # one of them
 ```
+
+Issues and pull requests are welcome. Run `just test` and `just examples` before sending one.
 
 ## License
 
