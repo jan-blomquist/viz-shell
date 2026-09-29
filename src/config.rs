@@ -56,6 +56,10 @@ pub struct Layer {
     /// The viz-shell banner above an interactive shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub banner: Option<bool>,
+    /// The interactive shell: a name on the image's PATH, or an absolute
+    /// path. Unset, or missing from the image: bash, else sh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
     /// What of the host the shell shares.
     #[serde(default, skip_serializing_if = "Share::is_unset")]
     pub share: Share,
@@ -444,6 +448,7 @@ pub struct EffectiveConfig {
     pub image: ImageSource,
     pub state_dir: Option<String>,
     pub banner: bool,
+    pub shell: Option<String>,
     pub share: Shared,
     pub privileges: Granted,
     pub env: EffectiveEnv,
@@ -696,8 +701,10 @@ impl Layer {
             ImageSource::Reference(reference) => format!("image {reference}"),
             ImageSource::Build(_) => "its own image".to_owned(),
         });
+        let shell = self.shell.as_ref().map(|shell| format!("shell {shell}"));
         [
             image,
+            shell,
             switch(self.privileges.sudo, "sudo"),
             switch(self.share.docker, "docker"),
             switch(self.share.host_network, "host network"),
@@ -721,6 +728,7 @@ impl Layer {
             image: over.image.clone().or(self.image),
             state_dir: over.state_dir.clone().or(self.state_dir),
             banner: over.banner.or(self.banner),
+            shell: over.shell.clone().or(self.shell),
             share: self.share.merge(&over.share),
             privileges: self.privileges.merge(&over.privileges),
             env: self.env.merge(&over.env),
@@ -733,6 +741,12 @@ impl Layer {
     /// Paths and names are well formed, each once per list, and `init` is
     /// given only to a file.
     fn check_entries(&self) -> anyhow::Result<()> {
+        if let Some(shell) = &self.shell {
+            ensure!(
+                is_shell(shell),
+                "shell `{shell}` is neither a name like `fish` nor an absolute path"
+            );
+        }
         check_unique(&self.state, "state path")?;
         for entry in &self.state {
             check_path("state", entry.key())?;
@@ -771,6 +785,21 @@ impl Layer {
             ensure!(!entry.key().is_empty(), "env file path is empty");
         }
         Ok(())
+    }
+}
+
+/// A program name, found on the image's PATH, or an absolute path.
+fn is_shell(shell: &str) -> bool {
+    !shell.is_empty()
+        && !shell.contains(char::is_whitespace)
+        && (shell.starts_with('/') || !shell.contains('/'))
+}
+
+/// A path under the home as `~/…`.
+pub fn tilde(path: &Path, home: &Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(below) => format!("~/{}", below.display()),
+        Err(_) => path.display().to_string(),
     }
 }
 
@@ -822,6 +851,7 @@ impl EffectiveConfig {
             image,
             state_dir: layer.state_dir,
             banner: layer.banner.unwrap_or(false),
+            shell: layer.shell,
             share: Shared {
                 docker: layer.share.docker.unwrap_or(false),
                 host_network: layer.share.host_network.unwrap_or(false),
@@ -930,6 +960,7 @@ impl EffectiveConfig {
             image: Some(self.image.clone()),
             state_dir: self.state_dir.clone(),
             banner: self.banner.then_some(true),
+            shell: self.shell.clone(),
             share: Share {
                 docker: self.share.docker.then_some(true),
                 host_network: self.share.host_network.then_some(true),
@@ -1196,6 +1227,7 @@ mounts:
             image: ImageSource::Reference("alpine".to_owned()),
             state_dir: None,
             banner: false,
+            shell: None,
             share: Shared::default(),
             privileges: Granted::default(),
             env: EffectiveEnv::default(),
@@ -1263,6 +1295,42 @@ profiles:
         let text = "image: debian\nprivileges:\n  root: true\n";
 
         assert!(error(text).contains("root"), "{}", error(text));
+    }
+
+    #[test]
+    fn effective__shell__the_last_layer_to_set_it() {
+        let text = "\
+image: debian
+shell: fish
+profiles:
+  plain:
+    shell: /bin/sh
+  inherits: {}
+";
+        let cases = [
+            (None, Some("fish")),
+            (Some("plain"), Some("/bin/sh")),
+            (Some("inherits"), Some("fish")),
+        ];
+        for (profile, expected) in cases {
+            assert_eq!(
+                effective(text, profile).shell.as_deref(),
+                expected,
+                "profile: {profile:?}"
+            );
+        }
+        assert_eq!(effective("image: debian\n", None).shell, None);
+    }
+
+    #[test]
+    fn parse__shell_neither_a_name_nor_absolute__is_refused() {
+        for shell in ["bin/fish", "\"\"", "\"fish -l\""] {
+            let text = format!("image: debian\nshell: {shell}\n");
+
+            let message = error(&text);
+
+            assert!(message.contains("absolute path"), "{shell}: {message}");
+        }
     }
 
     #[test]

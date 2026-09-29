@@ -1,7 +1,13 @@
 image:
   dockerfile: Dockerfile
 
+# fish, with its configuration and history kept in this repository's state
+# rather than taken from the host.
+shell: fish
+
 state:
+  - ~/.config/fish
+  - ~/.local/share/fish
   # Crate downloads: the image keeps CARGO_HOME at /usr/local/cargo.
   - /usr/local/cargo/registry
   # OpenCode's data folder, and its config file, which must start as valid JSON.

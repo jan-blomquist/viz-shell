@@ -6,9 +6,14 @@
 # The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
 image: debian:stable-slim
 
-# The viz-shell banner above an interactive shell: the repository, the
-# profile, and what the shell may do. Never above `vz -- command`.
+# A banner above an interactive shell, like fastfetch: the repository, branch,
+# profile, image, shell, and what the shell shares and may do. Never above
+# `vz -- command`.
 banner: true
+
+# The interactive shell for every repository: a name on the image's PATH, or an
+# absolute path. An image without it gives a warning, then bash, else sh.
+# shell: fish
 
 env:
   files:

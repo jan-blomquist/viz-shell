@@ -6,14 +6,14 @@ use crate::constants::PROFILE_ENV;
 
 /// One shell for every repo.
 #[derive(Debug, Parser)]
-#[command(name = "viz-shell", version, args_conflicts_with_subcommands = true)]
+#[command(name = "viz-shell", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub action: Option<Action>,
 
     /// The repository configuration to use instead of the one at the git
     /// root (viz-shell.yml, …, vz.yaml). Paths in it are relative to its folder.
-    #[arg(short = 'c', long)]
+    #[arg(short = 'c', long, global = true)]
     pub config_file: Option<PathBuf>,
 
     /// A profile from vz.yml, applied on top of its root
@@ -58,6 +58,23 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn parse__config_file_with_profiles__before_or_after_it() {
+        for args in [
+            ["vz", "-c", "other.yml", "profiles"],
+            ["vz", "profiles", "-c", "other.yml"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+
+            assert_eq!(cli.action, Some(Action::Profiles), "{args:?}");
+            assert_eq!(
+                cli.config_file,
+                Some(PathBuf::from("other.yml")),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

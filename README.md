@@ -36,7 +36,7 @@ because `vz` mounts itself into every container it starts: build it anywhere, ru
 ## Use
 
 ```sh
-vz                  # a shell: bash, else sh
+vz                  # a shell: `shell`, else bash, else sh
 vz -- cargo test    # one command instead
 vz -c other.yml     # another configuration: -c, --config-file
 vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
@@ -52,19 +52,40 @@ that is removed on exit; `vz` exits with its exit code. Inside:
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
 - `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set.
 
-`banner: true` prints the viz-shell banner above an interactive shell (never above `vz -- command`):
+`banner: true` prints a banner above an interactive shell (never above `vz -- command`), in the
+manner of fastfetch: what the shell is about to be. Colored on a terminal, unless `NO_COLOR` is set.
+The environment shows as a count, never names or values.
 
 ```
-       _              _          _ _
-__   _(_)____     ___| |__   ___| | |
-\ \ / / |_  /____/ __| '_ \ / _ \ | |
- \ V /| |/ /_____\__ \ | | |  __/ | |
-  \_/ |_/___|    |___/_| |_|\___|_|_|
-
-  vz | profile: trusted | sudo: yes | docker: yes | host network: yes
+       _              _          _ _    sally@app
+__   _(_)____     ___| |__   ___| | |   ---------
+\ \ / / |_  /____/ __| '_ \ / _ \ | |   Repo: ~/repos/app
+ \ V /| |/ /_____\__ \ | | |  __/ | |   Branch: main
+  \_/ |_/___|    |___/_| |_|\___|_|_|   Config: global.yml, viz-shell.yml
+                                        Profile: trusted
+                                        Image: vz-app:3f9c2a1b7d4e8f60
+                                        Shell: fish
+                                        Sudo: yes
+                                        Docker: /run/user/1000/docker.sock
+                                        Network: the host's
+                                        Mounts: ~/repos (ro), ~/.ssh (ro)
+                                        State: 2 paths in ~/repos/app/.vz_state
+                                        Env: 3 variables
 ```
 
 The global template turns it on; `banner: false` in a repository or profile turns it off.
+
+`shell` picks the interactive shell: a name on the image's `PATH`, or an absolute path. It is also
+`$SHELL` and your login shell inside. An image without it gives a warning, then bash, else sh, so a
+global `shell: fish` doesn't break images without fish. Keep fish's configuration and history per
+repository, apart from the host's, as state:
+
+```yaml
+shell: fish
+state:
+  - ~/.config/fish
+  - ~/.local/share/fish
+```
 
 Unknown keys in `vz.yml` are refused, naming the line.
 
@@ -203,8 +224,9 @@ privileges:
 ```
 
 - The secure floor, by default: every Linux capability dropped, `no-new-privileges` set. The
-  entrypoint keeps `CHOWN`, `SETUID` and `SETGID` just long enough to set you up; once it becomes you,
-  the shell holds no capabilities, and setuid programs such as `sudo` or `su` gain nothing.
+  container's root processes keep `CHOWN`, `SETUID`, `SETGID` and `KILL`: the entrypoint to set you
+  up, the init to pass signals on to your processes. Once the entrypoint becomes you, the shell holds
+  no capabilities, and setuid programs such as `sudo` or `su` gain nothing.
 - `sudo: true`: docker's default capabilities, no `no-new-privileges`, and a password-less sudoers
   line for you. An image without sudo gets a warning, and the shell starts without it.
 - The global template grants it in its `trusted` profile; `false` in a profile takes it back.
@@ -266,7 +288,7 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 - An entry is a bare path or name for the common case, or expanded for anything else.
 - An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
   a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
-- Settings (`image`, `state_dir`, `banner`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
+- Settings (`image`, `state_dir`, `banner`, `shell`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
@@ -319,6 +341,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
 | [`privileges`](examples/privileges) | the secure floor by default; sudo in a profile; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default |
+| [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |
 
 ## Logging
 

@@ -16,7 +16,7 @@ use tracing::{debug, warn};
 
 use crate::constants::{
     GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE, MOUNTINFO_FILE,
-    PASSWD_FILE, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
+    PASSWD_FILE, SHELL_ENV, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
 };
 use crate::user::{ExtraGroup, User, with_line};
 
@@ -24,7 +24,7 @@ use crate::user::{ExtraGroup, User, with_line};
 pub fn run(command: &[String]) -> anyhow::Result<()> {
     let user = User::from_env()?;
     let extra_groups = ExtraGroup::parse_list(&std::env::var(GROUPS_ENV).unwrap_or_default())?;
-    let shell = default_shell()?;
+    let shell = choose_shell()?;
     add_user(&user, &shell)?;
     add_extra_groups(&user, &extra_groups)?;
     if let Err(error) = add_hostname() {
@@ -218,12 +218,46 @@ fn user_command(user: &User, shell: &Path, command: &[String]) -> Command {
     process
 }
 
-fn default_shell() -> anyhow::Result<PathBuf> {
-    SHELLS
+/// The configured `shell` if the image has it; else, with a warning when one
+/// was configured, the first of bash and sh.
+fn choose_shell() -> anyhow::Result<PathBuf> {
+    let wanted = std::env::var(SHELL_ENV)
+        .ok()
+        .filter(|shell| !shell.is_empty());
+    let search_path = std::env::var("PATH").unwrap_or_default();
+    let exists = |path: &Path| path.is_file();
+    if let Some(shell) = wanted
+        .as_deref()
+        .and_then(|name| find_program(name, &search_path, exists))
+    {
+        return Ok(shell);
+    }
+    let fallback = SHELLS
         .iter()
         .map(PathBuf::from)
-        .find(|shell| shell.exists())
-        .with_context(|| format!("the image has none of {}", SHELLS.join(", ")))
+        .find(|shell| exists(shell))
+        .with_context(|| format!("the image has none of {}", SHELLS.join(", ")))?;
+    if let Some(wanted) = wanted {
+        warn!(
+            "shell `{wanted}` is not in the image, so {} instead; install it in the \
+             Dockerfile",
+            fallback.display()
+        );
+    }
+    Ok(fallback)
+}
+
+/// An absolute path as it is, a name in the first `search_path` folder that
+/// has it; `None` if missing.
+fn find_program(name: &str, search_path: &str, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    if name.starts_with('/') {
+        return Some(PathBuf::from(name)).filter(|path| exists(path));
+    }
+    search_path
+        .split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| Path::new(dir).join(name))
+        .find(|path| exists(path))
 }
 
 fn read(path: &str) -> anyhow::Result<String> {
@@ -272,6 +306,28 @@ mod tests {
     #[test]
     fn sudoers_line__user__without_a_password() {
         assert_eq!(sudoers_line("sally"), "sally ALL=(ALL) NOPASSWD:ALL\n");
+    }
+
+    #[test]
+    fn find_program__name_or_path__found_where_it_exists() {
+        let present = ["/usr/local/bin/fish", "/usr/bin/fish", "/bin/zsh"];
+        let exists = |path: &Path| present.iter().any(|p| Path::new(p) == path);
+        let search_path = "/usr/local/sbin:/usr/local/bin:/usr/bin::/bin";
+        let cases = [
+            ("fish", Some("/usr/local/bin/fish")),
+            ("zsh", Some("/bin/zsh")),
+            ("/usr/bin/fish", Some("/usr/bin/fish")),
+            ("nu", None),
+            ("/usr/bin/zsh", None),
+        ];
+
+        for (name, expected) in cases {
+            assert_eq!(
+                find_program(name, search_path, exists),
+                expected.map(PathBuf::from),
+                "{name}"
+            );
+        }
     }
 
     #[test]
