@@ -1,0 +1,3 @@
+# A static binary: built inside the container, it runs on any Linux host.
+[build]
+target = "x86_64-unknown-linux-musl"
