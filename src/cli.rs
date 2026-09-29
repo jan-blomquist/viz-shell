@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::constants::PROFILE_ENV;
+
 /// One shell for every repo.
 #[derive(Debug, Parser)]
 #[command(name = "vz", version, args_conflicts_with_subcommands = true)]
@@ -13,6 +15,14 @@ pub struct Cli {
     /// it are relative to its folder.
     #[arg(short = 'c', long)]
     pub config_file: Option<PathBuf>,
+
+    /// A profile from vz.yml, applied on top of its root
+    #[arg(long, env = PROFILE_ENV)]
+    pub profile: Option<String>,
+
+    /// Print the configuration vz would run with, as YAML, and exit
+    #[arg(long)]
+    pub show_effective_config: bool,
 
     /// A command to run instead of the shell: `vz -- cargo test`
     #[arg(last = true)]
@@ -48,6 +58,13 @@ mod tests {
             (short.config_file, long.config_file),
             (expected.clone(), expected)
         );
+    }
+
+    #[test]
+    fn parse__profile__names_it() {
+        let cli = Cli::try_parse_from(["vz", "--profile", "ci", "--", "true"]).unwrap();
+
+        assert_eq!(cli.profile.as_deref(), Some("ci"));
     }
 
     #[test]
