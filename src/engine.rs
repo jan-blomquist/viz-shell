@@ -2,9 +2,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::process::ExitStatus;
 
 use anyhow::{Context, bail, ensure};
-use docker_wrapper::{
-    DockerCommand, GenericCommand, InspectCommand, PullCommand, RunCommand, ensure_docker,
-};
+use docker_wrapper::{DockerCommand, GenericCommand, InspectCommand, PullCommand, ensure_docker};
 use tracing::{debug, info, instrument};
 
 use crate::build::BuildPlan;
@@ -75,25 +73,28 @@ impl Engine {
     #[instrument(skip_all, fields(tag = %plan.tag))]
     pub async fn build(&self, plan: &BuildPlan) -> anyhow::Result<()> {
         info!("building {}", plan.tag);
-        let status = attached(plan.command().build_command_args()).await?;
+        let status = attached(plan.command().build_command_args(), &[]).await?;
         ensure!(status.success(), "building {} failed: {status}", plan.tag);
         Ok(())
     }
 
-    /// Runs the container on this terminal and returns its exit code.
+    /// Runs `docker` with `args` on this terminal and returns the container's
+    /// exit code. `env` goes into the docker CLI's own environment, where
+    /// `--env NAME` takes its values from.
     #[instrument(skip_all)]
-    pub async fn run(&self, command: RunCommand) -> anyhow::Result<i32> {
-        let status = attached(command.build_command_args()).await?;
+    pub async fn run(&self, args: Vec<String>, env: &[(String, String)]) -> anyhow::Result<i32> {
+        let status = attached(args, env).await?;
         Ok(exit_code(status))
     }
 }
 
 /// Runs the docker CLI on this terminal: docker-wrapper's own `execute`
 /// captures output, which hides build progress and cannot carry a TTY.
-async fn attached(args: Vec<String>) -> anyhow::Result<ExitStatus> {
+async fn attached(args: Vec<String>, env: &[(String, String)]) -> anyhow::Result<ExitStatus> {
     debug!("{DOCKER_CLI} {}", args.join(" "));
     tokio::process::Command::new(DOCKER_CLI)
         .args(&args)
+        .envs(env.iter().map(|(name, value)| (name, value)))
         .status()
         .await
         .with_context(|| format!("running {DOCKER_CLI}"))
@@ -109,6 +110,8 @@ fn exit_code(status: ExitStatus) -> i32 {
 #[cfg(test)]
 #[allow(non_snake_case)] // unit__scenario__expected test names
 mod tests {
+    use docker_wrapper::RunCommand;
+
     use super::*;
 
     #[test]
@@ -131,7 +134,7 @@ mod tests {
 
         let run = RunCommand::new("hello-world:latest").remove();
 
-        let exit_code = engine.run(run).await.unwrap();
+        let exit_code = engine.run(run.build_command_args(), &[]).await.unwrap();
 
         assert_eq!(exit_code, 0);
     }

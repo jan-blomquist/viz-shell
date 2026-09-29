@@ -4,6 +4,7 @@ mod config;
 mod constants;
 mod engine;
 mod entrypoint;
+mod env;
 mod mounts;
 mod repo;
 mod session;
@@ -23,10 +24,11 @@ use crate::build::BuildPlan;
 use crate::cli::{Cli, Internal};
 use crate::config::{ImageSource, RepoConfig};
 use crate::constants::{
-    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, ENTRYPOINT_PATH, LOG_ENV, PASSTHROUGH_ENV,
-    REPO_CONFIG_FILE,
+    DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GROUP_ENV,
+    GROUPS_ENV, HOME_ENV, LOG_ENV, PASSTHROUGH_ENV, REPO_CONFIG_FILE, UID_ENV, USER_ENV,
 };
 use crate::engine::Engine;
+use crate::env::CliEnv;
 use crate::session::Session;
 use crate::share::DockerSocket;
 use crate::user::User;
@@ -83,6 +85,25 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
     let user = User::of_host()?;
     debug!("host user: {user:?}");
 
+    let cli_env = cli
+        .env
+        .iter()
+        .map(|arg| CliEnv::parse(arg))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let env_paths = env::Paths {
+        config_dir: &config_dir,
+        repo_root: &repo_root,
+        home: &user.home,
+    };
+    let environment = env::without_reserved(
+        env::plan(&config.env, &cli_env, &env_paths)?,
+        &reserved_env_names(),
+    );
+    if cli.show_env {
+        print_env(&config_file, cli.profile.as_deref(), &environment);
+        return Ok(0);
+    }
+
     let state_dir = match &config.state_dir {
         Some(dir) => config::resolve_host_path(dir, &config_dir, &user.home),
         None => repo_root.join(DEFAULT_STATE_DIR),
@@ -116,10 +137,50 @@ async fn launch(cli: &Cli) -> anyhow::Result<i32> {
         mounts: &mounts,
         docker: docker.as_ref(),
         passthrough: &passthrough_env(),
+        env_names: &environment.keys().cloned().collect::<Vec<_>>(),
         command: &cli.command,
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
     };
-    engine.run(session.run_command()).await
+    let values: Vec<(String, String)> = environment
+        .into_iter()
+        .map(|(name, var)| (name, var.value))
+        .collect();
+    engine.run(session.run_args(), &values).await
+}
+
+/// Names vz sets inside itself: the configured environment cannot change them.
+fn reserved_env_names() -> Vec<&'static str> {
+    [
+        USER_ENV,
+        UID_ENV,
+        GID_ENV,
+        GROUP_ENV,
+        HOME_ENV,
+        GROUPS_ENV,
+        DOCKER_HOST_ENV,
+    ]
+    .into_iter()
+    .chain(PASSTHROUGH_ENV)
+    .collect()
+}
+
+/// Names and sources, aligned; never a value.
+fn print_env(config_file: &Path, profile: Option<&str>, environment: &env::Environment) {
+    let profile = profile
+        .map(|name| format!(", profile {name}"))
+        .unwrap_or_default();
+    println!(
+        "# environment of {}{profile}: names and sources, never values",
+        config_file.display()
+    );
+    let width = environment.keys().map(String::len).max().unwrap_or(0);
+    for (name, var) in environment {
+        println!("{name:width$}  {}", var.source);
+    }
+    println!(
+        "# names vz sets itself, which these cannot change: {}",
+        reserved_env_names().join(", ")
+    );
 }
 
 /// Pulls or builds the image unless the engine already has it, and returns

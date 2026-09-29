@@ -8,8 +8,10 @@ pub const PROFILE_ENV: &str = "VZ_PROFILE";
 /// tools may set for themselves.
 pub const LOG_ENV: &str = "VZ_LOG";
 
-/// Warnings from everything, plus vz's own progress lines.
-pub const DEFAULT_LOG_FILTER: &str = "warn,vz=info";
+/// Warnings from everything, plus vz's own progress lines. docker-wrapper
+/// only reports errors: vz turns its failures into its own messages, and
+/// expected ones, like an image not yet present, would read as warnings.
+pub const DEFAULT_LOG_FILTER: &str = "warn,vz=info,docker_wrapper=error";
 
 /// Added to an image reference without a tag or digest; a pull without
 /// one fetches every tag.

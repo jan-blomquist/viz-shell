@@ -24,6 +24,16 @@ pub struct Cli {
     #[arg(long)]
     pub show_effective_config: bool,
 
+    /// Set a variable inside, over every other source: KEY=VALUE, or KEY to
+    /// copy the host's; repeatable
+    #[arg(short = 'e', long = "env", value_name = "KEY[=VALUE]")]
+    pub env: Vec<String>,
+
+    /// Print the environment's variable names and where each comes from, never
+    /// a value, and exit
+    #[arg(long)]
+    pub show_env: bool,
+
     /// A command to run instead of the shell: `vz -- cargo test`
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -65,6 +75,13 @@ mod tests {
         let cli = Cli::try_parse_from(["vz", "--profile", "ci", "--", "true"]).unwrap();
 
         assert_eq!(cli.profile.as_deref(), Some("ci"));
+    }
+
+    #[test]
+    fn parse__env_repeated__kept_in_order() {
+        let cli = Cli::try_parse_from(["vz", "-e", "A=1", "--env", "GH_TOKEN"]).unwrap();
+
+        assert_eq!(cli.env, strings(&["A=1", "GH_TOKEN"]));
     }
 
     #[test]
