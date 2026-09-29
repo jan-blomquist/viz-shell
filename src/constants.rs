@@ -1,5 +1,11 @@
-/// The repository configuration file, at the repository root.
-pub const REPO_CONFIG_FILE: &str = "vz.yml";
+/// The repository's configuration file at the git root: the first of these
+/// present is used; others present are ignored, with a warning.
+pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
+
+/// The global configuration: `$XDG_CONFIG_HOME/viz-shell/global.yml`, or
+/// `~/.config/viz-shell/global.yml` without it. What every repository starts from.
+pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";
+pub const GLOBAL_CONFIG_FILE: &str = "global.yml";
 
 /// Selects a profile when `--profile` is not given; CI sets it once.
 pub const PROFILE_ENV: &str = "VZ_PROFILE";
@@ -11,7 +17,7 @@ pub const LOG_ENV: &str = "VZ_LOG";
 /// Warnings from everything, plus vz's own progress lines. docker-wrapper
 /// only reports errors: vz turns its failures into its own messages, and
 /// expected ones, like an image not yet present, would read as warnings.
-pub const DEFAULT_LOG_FILTER: &str = "warn,vz=info,docker_wrapper=error";
+pub const DEFAULT_LOG_FILTER: &str = "warn,viz_shell=info,docker_wrapper=error";
 
 /// Added to an image reference without a tag or digest; a pull without
 /// one fetches every tag.
@@ -33,7 +39,7 @@ pub const FALLBACK_IMAGE_NAME: &str = "repo";
 pub const CONTENT_HASH_LEN: usize = 16;
 
 /// Where the launcher mounts its own binary, and runs it as the entrypoint.
-pub const ENTRYPOINT_PATH: &str = "/run/vz/vz";
+pub const ENTRYPOINT_PATH: &str = "/run/viz-shell/viz-shell";
 
 /// The entrypoint starts as root to add the host user, then becomes that user.
 pub const CONTAINER_ROOT: &str = "0:0";

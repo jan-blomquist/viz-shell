@@ -103,7 +103,7 @@ fn give_if_root_owned(dir: &Path, user: &User) -> anyhow::Result<()> {
 
 /// The mount point of each line of `/proc/self/mountinfo`: the fifth field,
 /// with the kernel's octal escapes (`\040` for a space) undone.
-fn mount_points(mountinfo: &str) -> Vec<PathBuf> {
+pub fn mount_points(mountinfo: &str) -> Vec<PathBuf> {
     mountinfo
         .lines()
         .filter_map(|line| line.split(' ').nth(4))

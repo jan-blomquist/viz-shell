@@ -15,6 +15,7 @@ Linux first, shell first, no editor required
 - [Share](#share)
 - [Environment](#environment)
 - [Profiles](#profiles)
+- [Global configuration](#global-configuration)
 - [Examples](#examples)
 - [Logging](#logging)
 - [Test](#test)
@@ -23,7 +24,9 @@ Linux first, shell first, no editor required
 ## Build
 
 ```sh
-cargo build --release    # → target/x86_64-unknown-linux-musl/release/vz
+just build      # → target/x86_64-unknown-linux-musl/release/viz-shell
+just install    # → ~/.local/bin/viz-shell2, and the alias ~/.local/bin/vz2
+just install "" # → viz-shell and vz, once the legacy viz-shell no longer holds those names
 ```
 
 Rust 1.95.0 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
@@ -37,9 +40,11 @@ vz -- cargo test    # one command instead
 vz -c other.yml     # another configuration: -c, --config-file
 vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
 vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
+vz profiles         # the profiles of the global and the repository configuration
 ```
 
-`vz` reads `vz.yml` at the git root, or the `-c` file, pulls or builds the image if missing, and runs a container
+`vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
+`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or builds the image if missing, and runs a container
 that is removed on exit; `vz` exits with its exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
@@ -167,7 +172,7 @@ share:
 - Sharing the daemon gives the shell root-equivalent control of the host: only for trusted repositories.
 - `false` in a profile turns it off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
-  repository (`target/…/release/vz`); another is refused.
+  repository (`target/…/release/viz-shell`); another is refused.
 
 ## Environment
 
@@ -231,6 +236,36 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
 
+## Global configuration
+
+`~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
+configuration, and every repository starts from it. The first `vz` writes it from
+[`templates/global.yml`](templates/global.yml) when there is none, and never overwrites it: an untrusted
+default and a `trusted` profile with docker, `~/.ssh` and trusted-only secrets. Edit it freely.
+
+- A repository without a configuration runs from the global one alone.
+- Layers, later wins: global root, repository root, then for the chosen profile and each it extends
+  (first extended first): its global section, then its repository section.
+
+| `vz` | layers |
+|---|---|
+| `vz` | global root → repo root |
+| `vz --profile trusted` | … → global `trusted` → repo `trusted` |
+| `vz --profile ci`, repo `ci: { extends: trusted }` | … → global `trusted` → repo `trusted` → repo `ci` |
+
+- A profile is a mode: each file says what it adds in it. A repository's `trusted:` adds to the global
+  `trusted`, and any profile can `extends: trusted`. A chosen profile beats both roots.
+- Relative paths belong to their file: `trusted.env` in `global.yml` is `~/.config/viz-shell/trusted.env`.
+  Every path is made absolute when read, so a repository removes a global entry however it writes it.
+- `vz profiles` lists each profile and the files that define it; `--show-effective-config` and
+  `--show-env` name the files read and the layers applied.
+
+Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, which can name any host
+file or share the docker daemon. Review a repository's configuration as you would its code. What
+protects the host is what reaches the container: only the repository, and what the configuration
+shares or mounts. The secure floor inside the container (capabilities dropped, no new privileges)
+comes with the `privileges` work.
+
 ## Examples
 
 Recipes in [`examples/`](examples), each with a `test.sh` that runs it and checks the result.
@@ -246,19 +281,20 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 | [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight |
+| [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
 
 ## Logging
 
-Stderr, filtered by `VZ_LOG` (default `warn,vz=info,docker_wrapper=error`):
+Stderr, filtered by `VZ_LOG` (default `warn,viz_shell=info,docker_wrapper=error`):
 
 ```sh
-VZ_LOG=vz=debug vz    # each step, and every docker command in full
+VZ_LOG=viz_shell=debug vz    # each step, and every docker command in full
 VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, output size
 ```
 
 ## Test
 
-Build first (`just build`); the example tests run `target/.../release/vz`, or `$VZ`.
+Build first (`just build`); the example tests run `target/.../release/viz-shell`, or `$VZ`.
 Each runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches yours,
 and starts with an empty `.vz_state/`. This repository shares docker, so everything runs inside `vz`
 too: `vz -- just build examples`.

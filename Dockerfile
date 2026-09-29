@@ -24,7 +24,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
- && cp target/x86_64-unknown-linux-musl/release/vz /usr/local/bin/vz
+ && cp target/x86_64-unknown-linux-musl/release/viz-shell /usr/local/bin/viz-shell
 
 FROM toolchain
 RUN apt-get update \
@@ -34,5 +34,6 @@ RUN apt-get update \
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 COPY --from=just /usr/local/bin/just /usr/local/bin/just
-COPY --from=vz /usr/local/bin/vz /usr/local/bin/vz
-CMD ["sh", "-c", "rustc --version && cargo --version && docker --version && ls -l /usr/local/bin/vz"]
+COPY --from=vz /usr/local/bin/viz-shell /usr/local/bin/viz-shell
+RUN ln -s viz-shell /usr/local/bin/vz
+CMD ["sh", "-c", "rustc --version && cargo --version && docker --version && vz --version"]

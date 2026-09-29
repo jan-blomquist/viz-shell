@@ -8,7 +8,7 @@ printf 'LEVEL="ci file"\n' > "$HOME/ci.env"
 show() { inside sh -c "echo \"\$$1\""; }
 
 expect_output "a default" "hello" show GREETING
-expect_output "\${repo} is substituted" "$repo_root" show REPO_ROOT
+expect_output "\${repo} is substituted" "$PWD" show REPO_ROOT
 expect_output "a file beats a default" "first file" show LEVEL
 expect_output "and adds its own" "yes" show FROM_FILE
 
@@ -38,7 +38,7 @@ expect_contains "--show-env names each source" "env.files $HOME/example.env" sho
 expect_lacks "and never a value" "secret-value" show_env
 
 logged_command() {
-    env VZ_EXAMPLE_TOKEN=secret-value VZ_LOG=vz=debug "${vz[@]}" -- true 2>&1 >/dev/null
+    env VZ_EXAMPLE_TOKEN=secret-value VZ_LOG=viz_shell=debug "${vz[@]}" -- true 2>&1 >/dev/null
 }
 expect_contains "docker gets the name" "--env VZ_EXAMPLE_TOKEN" logged_command
 expect_lacks "never the value" "secret-value" logged_command

@@ -1,6 +1,9 @@
-//! `vz.yml`: a root layer and named profiles, each a [`Layer`] of the same
-//! shape. [`RepoConfig::effective`] merges the root with a profile's chain
-//! and resolves the result into the [`EffectiveConfig`] vz runs with.
+//! Configuration: the global file and the repository's, each a root [`Layer`]
+//! with named profiles of the same shape. [`Config::effective`] applies them
+//! in order and resolves the result into the [`EffectiveConfig`] vz runs with:
+//! global root, repo root, then for each profile of the chosen one's
+//! `extends` chain, its global section, then its repo section. A profile is a
+//! mode: each file says what it adds in it.
 //!
 //! Collections are lists of entries, each keyed by its path or name: a bare
 //! entry for the common case, the expanded form for anything else, and
@@ -9,7 +12,7 @@
 //! `env.defaults`, keyed by variable name, and `profiles`, keyed by profile
 //! name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
@@ -17,11 +20,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_TAG, HOME_PREFIX};
 
-/// The parsed `vz.yml`, checked: every path well formed, every key once per
-/// list, every `extends` naming a profile, no cycles.
+/// The configuration files in effect, each optional, checked: every
+/// `extends` names a profile of either file, and none forms a cycle.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Config {
+    global: Option<Layer>,
+    repo: Option<Layer>,
+}
+
+/// A profile as `vz profiles` shows it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RepoConfig {
-    root: Layer,
+pub struct ProfileInfo {
+    pub name: String,
+    /// `global`, `repo`, or both, in that order.
+    pub defined_in: Vec<&'static str>,
+    pub extends: Option<String>,
 }
 
 /// One layer of configuration: the root of `vz.yml`, or a profile. Every
@@ -59,6 +72,7 @@ pub struct Layer {
 trait Keyed: Clone {
     /// The path or name that identifies the entry.
     fn key(&self) -> &str;
+    fn key_mut(&mut self) -> &mut String;
     fn enabled(&self) -> bool;
 }
 
@@ -204,6 +218,13 @@ impl Keyed for FileItem {
         }
     }
 
+    fn key_mut(&mut self) -> &mut String {
+        match self {
+            FileItem::Path(key) => key,
+            FileItem::Full(spec) => &mut spec.path,
+        }
+    }
+
     fn enabled(&self) -> bool {
         !matches!(self, FileItem::Full(spec) if !spec.enabled)
     }
@@ -230,6 +251,13 @@ impl Keyed for PassthroughItem {
         match self {
             PassthroughItem::Name(name) => name,
             PassthroughItem::Full(spec) => &spec.name,
+        }
+    }
+
+    fn key_mut(&mut self) -> &mut String {
+        match self {
+            PassthroughItem::Name(key) => key,
+            PassthroughItem::Full(spec) => &mut spec.name,
         }
     }
 
@@ -304,6 +332,13 @@ impl Keyed for StateItem {
         }
     }
 
+    fn key_mut(&mut self) -> &mut String {
+        match self {
+            StateItem::Path(key) => key,
+            StateItem::Full(spec) => &mut spec.path,
+        }
+    }
+
     fn enabled(&self) -> bool {
         !matches!(self, StateItem::Full(spec) if !spec.enabled)
     }
@@ -349,6 +384,13 @@ impl Keyed for MountItem {
         }
     }
 
+    fn key_mut(&mut self) -> &mut String {
+        match self {
+            MountItem::Path(key) => key,
+            MountItem::Full(spec) => &mut spec.path,
+        }
+    }
+
     fn enabled(&self) -> bool {
         !matches!(self, MountItem::Full(spec) if !spec.enabled)
     }
@@ -358,6 +400,8 @@ impl Keyed for MountItem {
 /// shorthands spelled out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveConfig {
+    /// The layers applied, in order: `global root`, `repo trusted`, …
+    pub layers: Vec<String>,
     pub image: ImageSource,
     pub state_dir: Option<String>,
     pub share: Shared,
@@ -405,16 +449,116 @@ pub struct MountEntry {
     pub mode: MountMode,
 }
 
-impl RepoConfig {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("in {}", path.display()))
+impl Config {
+    /// Checks the profiles across both files.
+    pub fn new(global: Option<Layer>, repo: Option<Layer>) -> anyhow::Result<Self> {
+        let config = Self { global, repo };
+        for name in config.profile_names() {
+            config.chain(&name)?;
+        }
+        Ok(config)
     }
 
+    /// Global root, repo root, then for each profile of the chosen one's
+    /// chain, from its start: its global section, then its repo section.
+    /// Later layers win per field and per key.
+    pub fn effective(&self, profile: Option<&str>) -> anyhow::Result<EffectiveConfig> {
+        let chain = match profile {
+            Some(name) => self.chain(name)?,
+            None => Vec::new(),
+        };
+        let mut layers: Vec<(String, &Layer)> = Vec::new();
+        layers.extend(
+            self.global
+                .iter()
+                .map(|root| ("global root".to_owned(), root)),
+        );
+        layers.extend(self.repo.iter().map(|root| ("repo root".to_owned(), root)));
+        for name in &chain {
+            for (origin, file) in self.files() {
+                if let Some(section) = file.profiles.get(name) {
+                    layers.push((format!("{origin} {name}"), section));
+                }
+            }
+        }
+        let merged = layers
+            .iter()
+            .fold(Layer::default(), |base, (_, over)| base.merge(over));
+        let mut effective = EffectiveConfig::resolve(merged)?;
+        effective.layers = layers.into_iter().map(|(label, _)| label).collect();
+        Ok(effective)
+    }
+
+    /// Every profile, with the files that define it and what it extends.
+    pub fn profiles(&self) -> Vec<ProfileInfo> {
+        self.profile_names()
+            .into_iter()
+            .map(|name| ProfileInfo {
+                defined_in: self
+                    .files()
+                    .filter(|(_, file)| file.profiles.contains_key(&name))
+                    .map(|(origin, _)| origin)
+                    .collect(),
+                extends: self.extends(&name).map(str::to_owned),
+                name,
+            })
+            .collect()
+    }
+
+    fn files(&self) -> impl Iterator<Item = (&'static str, &Layer)> {
+        [
+            ("global", self.global.as_ref()),
+            ("repo", self.repo.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(origin, file)| Some((origin, file?)))
+    }
+
+    fn profile_names(&self) -> BTreeSet<String> {
+        self.files()
+            .flat_map(|(_, file)| file.profiles.keys().cloned())
+            .collect()
+    }
+
+    /// The repo's `extends` for a profile, else the global one's.
+    fn extends(&self, name: &str) -> Option<&str> {
+        self.files()
+            .filter_map(|(_, file)| file.profiles.get(name)?.extends.as_deref())
+            .last()
+    }
+
+    /// The profile and those it extends, the first one extended first.
+    fn chain(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        let known = self.profile_names();
+        let mut chain: Vec<String> = Vec::new();
+        let mut next = Some(name);
+        while let Some(name) = next {
+            if chain.iter().any(|seen| seen == name) {
+                bail!(
+                    "profiles extend each other in a cycle: {} → {name}",
+                    chain.join(" → ")
+                );
+            }
+            if !known.contains(name) {
+                let known: Vec<&str> = known.iter().map(String::as_str).collect();
+                bail!(match known.as_slice() {
+                    [] => format!("no profile `{name}`: no configuration defines one"),
+                    _ => format!("no profile `{name}`; defined: {}", known.join(", ")),
+                });
+            }
+            chain.push(name.to_owned());
+            next = self.extends(name);
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+}
+
+impl Layer {
+    /// One configuration file, checked on its own: `extends` only in
+    /// profiles, profiles not nested, paths and names well formed.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        let root: Layer =
-            serde_saphyr::from_str(text).context("invalid repository configuration")?;
+        let root: Layer = serde_saphyr::from_str(text).context("invalid configuration")?;
         ensure!(
             root.extends.is_none(),
             "`extends` belongs in a profile; the root is what every profile starts from"
@@ -429,59 +573,59 @@ impl RepoConfig {
                 .check_entries()
                 .with_context(|| format!("in profile `{name}`"))?;
         }
-        let config = Self { root };
-        for name in config.root.profiles.keys() {
-            config.chain(name)?;
-        }
-        Ok(config)
+        Ok(root)
     }
 
-    /// The root, then the profile's `extends` chain from its start, then the
-    /// profile itself: later layers win per field and per key.
-    pub fn effective(&self, profile: Option<&str>) -> anyhow::Result<EffectiveConfig> {
-        let chain = match profile {
-            Some(name) => self.chain(name)?,
-            None => Vec::new(),
+    /// Reads, checks, and makes every host path absolute: relative to the
+    /// file's own folder, `~/…` under the home, `${repo}` and `${home}`
+    /// substituted. Only then do entries of different files match by path.
+    pub fn load(path: &Path, home: &Path, repo_root: &Path) -> anyhow::Result<Self> {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut layer = Self::parse(&text).with_context(|| format!("in {}", path.display()))?;
+        let dir = path.parent().unwrap_or(Path::new("/"));
+        layer
+            .resolve_paths(dir, home, repo_root)
+            .with_context(|| format!("in {}", path.display()))?;
+        Ok(layer)
+    }
+
+    fn resolve_paths(&mut self, dir: &Path, home: &Path, repo_root: &Path) -> anyhow::Result<()> {
+        let host_path = |path: &str| -> anyhow::Result<String> {
+            let path = substitute(path, repo_root, home)?;
+            Ok(resolve_host_path(&path, dir, home)
+                .to_string_lossy()
+                .into_owned())
         };
-        let merged = chain
-            .into_iter()
-            .fold(self.root.clone(), |base, over| base.merge(over));
-        EffectiveConfig::resolve(merged)
-    }
-
-    /// The profile and those it extends, the first one extended first.
-    fn chain(&self, name: &str) -> anyhow::Result<Vec<&Layer>> {
-        let mut names: Vec<&str> = Vec::new();
-        let mut chain = Vec::new();
-        let mut next = Some(name);
-        while let Some(name) = next {
-            if names.contains(&name) {
-                bail!(
-                    "profiles extend each other in a cycle: {} → {name}",
-                    names.join(" → ")
-                );
-            }
-            let layer = self.profile(name)?;
-            names.push(name);
-            chain.push(layer);
-            next = layer.extends.as_deref();
+        if let Some(ImageSource::Build(spec)) = &mut self.image {
+            spec.dockerfile = dir.join(&spec.dockerfile);
+            spec.context = dir.join(&spec.context);
         }
-        chain.reverse();
-        Ok(chain)
+        if let Some(state_dir) = &self.state_dir {
+            self.state_dir = Some(host_path(state_dir)?);
+        }
+        for entry in &mut self.env.files {
+            let path = host_path(entry.key())?;
+            *entry.key_mut() = path;
+        }
+        for entry in &mut self.state {
+            let path = expand_path(entry.key(), home)
+                .to_string_lossy()
+                .into_owned();
+            *entry.key_mut() = path;
+        }
+        for entry in &mut self.mounts {
+            let path = expand_path(entry.key(), home)
+                .to_string_lossy()
+                .into_owned();
+            *entry.key_mut() = path;
+        }
+        for profile in self.profiles.values_mut() {
+            profile.resolve_paths(dir, home, repo_root)?;
+        }
+        Ok(())
     }
 
-    fn profile(&self, name: &str) -> anyhow::Result<&Layer> {
-        self.root.profiles.get(name).with_context(|| {
-            let known: Vec<&str> = self.root.profiles.keys().map(String::as_str).collect();
-            match known.as_slice() {
-                [] => format!("no profile `{name}`: vz.yml defines none"),
-                _ => format!("no profile `{name}`; vz.yml defines {}", known.join(", ")),
-            }
-        })
-    }
-}
-
-impl Layer {
     /// `over` on top of `self`: its fields where set, its entries per key.
     /// The result is a plain layer: no `extends`, no profiles.
     fn merge(self, over: &Layer) -> Layer {
@@ -554,7 +698,7 @@ impl EffectiveConfig {
     fn resolve(layer: Layer) -> anyhow::Result<Self> {
         let image = layer
             .image
-            .context("no image: set `image:` in vz.yml, or in the profile")?;
+            .context("no image: set `image:` in the global or the repository configuration")?;
         let state = layer
             .state
             .iter()
@@ -585,6 +729,7 @@ impl EffectiveConfig {
             })
             .collect();
         Ok(Self {
+            layers: Vec::new(),
             image,
             state_dir: layer.state_dir,
             share: Shared {
@@ -701,6 +846,44 @@ impl EffectiveConfig {
     }
 }
 
+/// The global configuration a first run writes: `templates/global.yml`.
+pub const DEFAULT_GLOBAL: &str = include_str!("../templates/global.yml");
+
+/// Writes the default global configuration when there is none; never
+/// overwrites. Returns whether it wrote.
+pub fn scaffold_global(path: &Path) -> anyhow::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::fs::write(path, DEFAULT_GLOBAL).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// `${repo}` and `${home}`; any other `${…}` is an error. A `$` not followed
+/// by `{` stays as it is.
+pub fn substitute(text: &str, repo_root: &Path, home: &Path) -> anyhow::Result<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after
+            .find('}')
+            .with_context(|| format!("`{text}` has a `${{` without `}}`"))?;
+        match &after[..end] {
+            "repo" => out.push_str(&repo_root.to_string_lossy()),
+            "home" => out.push_str(&home.to_string_lossy()),
+            other => bail!("`${{{other}}}` in `{text}`: vz substitutes ${{repo}} and ${{home}}"),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// `~/…` or absolute, naming a place below it without `.`, `..` or `//`.
 fn check_path(what: &str, path: &str) -> anyhow::Result<()> {
     let below = path
@@ -751,12 +934,18 @@ pub fn with_default_tag(reference: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A repository configuration alone.
+    fn repo(text: &str) -> Config {
+        Config::new(None, Some(Layer::parse(text).unwrap())).unwrap()
+    }
+
     fn effective(text: &str, profile: Option<&str>) -> EffectiveConfig {
-        RepoConfig::parse(text).unwrap().effective(profile).unwrap()
+        repo(text).effective(profile).unwrap()
     }
 
     fn error(text: &str) -> String {
-        format!("{:#}", RepoConfig::parse(text).unwrap_err())
+        let result = Layer::parse(text).and_then(|layer| Config::new(None, Some(layer)));
+        format!("{:#}", result.unwrap_err())
     }
 
     fn state(path: &str, kind: StateKind, init: Option<&str>) -> StateEntry {
@@ -900,6 +1089,11 @@ mounts:
         let config = effective(BASE, Some("bare-alpine"));
 
         let expected = EffectiveConfig {
+            layers: vec![
+                "repo root".to_owned(),
+                "repo bare".to_owned(),
+                "repo bare-alpine".to_owned(),
+            ],
             image: ImageSource::Reference("alpine".to_owned()),
             state_dir: None,
             share: Shared::default(),
@@ -1063,7 +1257,7 @@ profiles:
 
     #[test]
     fn effective__unknown_profile__is_refused_naming_the_defined_ones() {
-        let config = RepoConfig::parse(BASE).unwrap();
+        let config = repo(BASE);
 
         let error = config.effective(Some("nope")).unwrap_err().to_string();
 
@@ -1075,7 +1269,7 @@ profiles:
 
     #[test]
     fn effective__no_image_anywhere__is_refused() {
-        let config = RepoConfig::parse("mounts: [~/repos]\n").unwrap();
+        let config = repo("mounts: [~/repos]\n");
 
         let error = config.effective(None).unwrap_err().to_string();
 
@@ -1102,7 +1296,11 @@ profiles:
 
             let yaml = config.to_yaml().unwrap();
 
-            assert_eq!(effective(&yaml, None), config, "{yaml}");
+            let reread = EffectiveConfig {
+                layers: config.layers.clone(),
+                ..effective(&yaml, None)
+            };
+            assert_eq!(reread, config, "{yaml}");
         }
     }
 
@@ -1140,7 +1338,7 @@ mounts:
     fn parse__unknown_key_in_build__is_refused() {
         let text = "image:\n  dockerfile: Dockerfile\n  dockerfle: typo\n";
 
-        let result = RepoConfig::parse(text);
+        let result = Layer::parse(text);
 
         assert!(result.is_err(), "{result:?}");
     }
@@ -1185,7 +1383,7 @@ mounts:
     fn parse__unknown_mount_mode__is_refused() {
         let text = "image: debian\nmounts:\n  - { path: ~/.config/gh, mode: wr }\n";
 
-        let result = RepoConfig::parse(text);
+        let result = Layer::parse(text);
 
         assert!(result.is_err(), "{result:?}");
     }
@@ -1215,6 +1413,79 @@ mounts:
     }
 
     #[test]
+    fn substitute__cases() {
+        let cases = [
+            ("plain", "plain"),
+            ("${repo}/data", "/home/sally/repos/app/data"),
+            ("${home}/.cache", "/home/sally/.cache"),
+            ("cost: $5 and $HOME", "cost: $5 and $HOME"),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                substitute(
+                    text,
+                    Path::new("/home/sally/repos/app"),
+                    Path::new("/home/sally")
+                )
+                .unwrap(),
+                expected,
+                "text: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn substitute__unknown_or_unclosed__is_refused_naming_it() {
+        for (text, expected) in [
+            ("${profile}", "${profile}"),
+            ("${env:X}", "${env:X}"),
+            ("${repo", "without"),
+        ] {
+            let error = substitute(
+                text,
+                Path::new("/home/sally/repos/app"),
+                Path::new("/home/sally"),
+            )
+            .unwrap_err()
+            .to_string();
+
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn scaffold_global__missing__writes_the_template() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".config/viz-shell/global.yml");
+
+        let wrote = scaffold_global(&path).unwrap();
+
+        assert!(wrote);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_GLOBAL);
+    }
+
+    #[test]
+    fn scaffold_global__present__kept_as_it_is() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("global.yml");
+        std::fs::write(&path, "image: mine\n").unwrap();
+
+        let wrote = scaffold_global(&path).unwrap();
+
+        assert!(!wrote);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "image: mine\n");
+    }
+
+    #[test]
+    fn default_global__is_valid_with_each_profile() {
+        let config = Config::new(Some(Layer::parse(DEFAULT_GLOBAL).unwrap()), None).unwrap();
+
+        for profile in [None, Some("trusted")] {
+            assert!(config.effective(profile).is_ok(), "profile: {profile:?}");
+        }
+    }
+
+    #[test]
     fn resolve_host_path__relative_home_and_absolute() {
         let cases = [
             (
@@ -1235,28 +1506,223 @@ mounts:
         }
     }
 
-    /// The recipes in `examples/` and the repository's own `vz.yml` stay valid
-    /// as the schema changes, with every profile they define.
+    /// The recipes in `examples/`, the repository's own configuration and the
+    /// global template stay valid as the schema changes, with every profile.
+    /// A folder with neither kind of file is skipped.
     #[test]
     fn load__every_example_and_the_repository_file__resolves_with_each_profile() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let home = Path::new("/home/sally");
         let examples = std::fs::read_dir(root.join("examples")).unwrap();
-        let files = examples
+        let dirs: Vec<PathBuf> = examples
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.is_dir())
-            .map(|dir| dir.join("vz.yml"))
-            .chain([root.join("vz.yml")]);
-        for file in files {
-            let config = RepoConfig::load(&file).unwrap_or_else(|e| panic!("{e:#}"));
-            let profiles = [None]
-                .into_iter()
-                .chain(config.root.profiles.keys().map(|name| Some(name.as_str())));
+            .chain([root.to_owned(), root.join("templates")])
+            .collect();
+        for dir in dirs {
+            let read = |file: Option<PathBuf>| {
+                file.map(|file| Layer::load(&file, home, root).unwrap_or_else(|e| panic!("{e:#}")))
+            };
+            // The repository file by the same precedence vz uses.
+            let global_file = Some(dir.join("global.yml")).filter(|file| file.is_file());
+            let (global, repo) = (read(global_file), read(crate::repo::config_file(&dir)));
+            if global.is_none() && repo.is_none() {
+                continue;
+            }
+            let config =
+                Config::new(global, repo).unwrap_or_else(|e| panic!("{}: {e:#}", dir.display()));
+            let profiles = [None].into_iter().chain(
+                config
+                    .profiles()
+                    .into_iter()
+                    .map(|profile| Some(profile.name)),
+            );
             for profile in profiles {
-                let result = config.effective(profile);
+                let result = config.effective(profile.as_deref());
 
-                assert!(result.is_ok(), "{} {profile:?}: {result:?}", file.display());
+                assert!(result.is_ok(), "{} {profile:?}: {result:?}", dir.display());
             }
         }
+    }
+
+    const GLOBAL: &str = "\
+image: debian
+env:
+  defaults: { WHO: global, GLOBAL_ONLY: \"yes\" }
+mounts:
+  - ~/.gitconfig
+profiles:
+  trusted:
+    share: { docker: true }
+    env:
+      files: [secrets.env]
+  work:
+    env:
+      defaults: { WORK: \"yes\" }
+";
+
+    const REPO: &str = "\
+env:
+  defaults: { WHO: repo }
+share:
+  docker: false
+mounts:
+  - { path: ~/.gitconfig, enabled: false }
+profiles:
+  trusted:
+    env:
+      defaults: { WHO: repo-trusted }
+  ci:
+    extends: trusted
+";
+
+    const SALLY: &str = "/home/sally";
+    const APP: &str = "/home/sally/repos/app";
+
+    /// Each text read as `load` reads its file: paths resolved against its
+    /// own folder.
+    fn both(global: &str, repo: &str) -> Config {
+        let read = |text: &str, dir: &str| {
+            let mut layer = Layer::parse(text).unwrap();
+            layer
+                .resolve_paths(Path::new(dir), Path::new(SALLY), Path::new(APP))
+                .unwrap();
+            layer
+        };
+        let global = read(global, "/home/sally/.config/viz-shell");
+        Config::new(Some(global), Some(read(repo, APP))).unwrap()
+    }
+
+    fn who(config: &EffectiveConfig) -> &str {
+        let (_, value) = config
+            .env
+            .defaults
+            .iter()
+            .find(|(name, _)| name == "WHO")
+            .unwrap();
+        value
+    }
+
+    #[test]
+    fn effective__no_profile__global_root_then_repo_root() {
+        let config = both(GLOBAL, REPO).effective(None).unwrap();
+
+        assert_eq!(config.layers, ["global root", "repo root"]);
+        assert_eq!(config.image, ImageSource::Reference("debian".to_owned()));
+        assert_eq!(who(&config), "repo");
+    }
+
+    #[test]
+    fn effective__profile_in_both_files__global_section_then_repo_section() {
+        let config = both(GLOBAL, REPO).effective(Some("trusted")).unwrap();
+
+        assert_eq!(
+            config.layers,
+            ["global root", "repo root", "global trusted", "repo trusted"]
+        );
+        assert_eq!(who(&config), "repo-trusted");
+    }
+
+    #[test]
+    fn effective__chosen_profile__beats_both_roots() {
+        let config = both(GLOBAL, REPO).effective(Some("trusted")).unwrap();
+
+        // The repo root turns docker off; the global trusted profile turns it on.
+        assert!(config.share.docker);
+    }
+
+    #[test]
+    fn effective__profile_only_in_the_global_file__applies_in_any_repo() {
+        let config = both(GLOBAL, REPO).effective(Some("work")).unwrap();
+
+        let work = config.env.defaults.iter().any(|(name, _)| name == "WORK");
+        assert!(work, "{:?}", config.env.defaults);
+    }
+
+    #[test]
+    fn effective__repo_profile_extending_a_global_one__applies_both_first() {
+        let config = both(GLOBAL, REPO).effective(Some("ci")).unwrap();
+
+        assert_eq!(
+            config.layers,
+            [
+                "global root",
+                "repo root",
+                "global trusted",
+                "repo trusted",
+                "repo ci"
+            ]
+        );
+        assert!(config.share.docker);
+    }
+
+    #[test]
+    fn effective__relative_paths__resolved_against_their_own_file() {
+        let config = both(GLOBAL, "env:\n  files: [.env]\n")
+            .effective(Some("trusted"))
+            .unwrap();
+
+        let files: Vec<&str> = config
+            .env
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(
+            files,
+            [
+                "/home/sally/repos/app/.env",
+                "/home/sally/.config/viz-shell/secrets.env"
+            ]
+        );
+    }
+
+    #[test]
+    fn effective__repo_entry__disables_a_global_one_written_either_way() {
+        let config = both(GLOBAL, REPO).effective(None).unwrap();
+
+        // Global `~/.gitconfig`; the repo disables `~/.gitconfig` too: both
+        // are /home/sally/.gitconfig once read.
+        assert_eq!(config.mounts, vec![]);
+    }
+
+    #[test]
+    fn profiles__both_files__each_with_where_it_is_defined() {
+        let profiles = both(GLOBAL, REPO).profiles();
+
+        let expected = vec![
+            ProfileInfo {
+                name: "ci".to_owned(),
+                defined_in: vec!["repo"],
+                extends: Some("trusted".to_owned()),
+            },
+            ProfileInfo {
+                name: "trusted".to_owned(),
+                defined_in: vec!["global", "repo"],
+                extends: None,
+            },
+            ProfileInfo {
+                name: "work".to_owned(),
+                defined_in: vec!["global"],
+                extends: None,
+            },
+        ];
+        assert_eq!(profiles, expected);
+    }
+
+    #[test]
+    fn new__extends_a_profile_neither_file_defines__is_refused_naming_both_files_profiles() {
+        let repo = Layer::parse("profiles:\n  ci:\n    extends: nope\n").unwrap();
+        let global = Layer::parse(GLOBAL).unwrap();
+
+        let error = Config::new(Some(global), Some(repo))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("no profile `nope`; defined: ci, trusted, work"),
+            "{error}"
+        );
     }
 
     #[test]

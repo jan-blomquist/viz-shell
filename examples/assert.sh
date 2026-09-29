@@ -8,7 +8,7 @@ set -euo pipefail
 example_dir=$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)
 example=$(basename "$example_dir")
 repo_root=$(cd "$example_dir/../.." && pwd)
-vz_bin=${VZ:-$repo_root/target/x86_64-unknown-linux-musl/release/vz}
+vz_bin=${VZ:-$repo_root/target/x86_64-unknown-linux-musl/release/viz-shell}
 if [[ ! -x $vz_bin ]]; then
     echo "no vz binary at $vz_bin: run cargo build --release, or set VZ" >&2
     exit 1
@@ -25,10 +25,16 @@ rm -rf "$HOME" && mkdir -p "$HOME"
 # Every run starts with no state.
 rm -rf "$example_dir/.vz_state"
 export VZ_LOG=${VZ_LOG:-warn}
-# A profile from the caller's shell would change every test.
-unset VZ_PROFILE
+# A profile from the caller's shell would change every test, and so would
+# their global configuration: the throwaway home has none unless a test writes one.
+unset VZ_PROFILE XDG_CONFIG_HOME
 
-cd "$repo_root"
+# vz runs from a throwaway repository in the throwaway home, never from this
+# one: this repository holds the home, and mounting it would show the home
+# through the repository mount, hiding what a test mounts, removes or bakes.
+app="$HOME/repos/app"
+git init -q "$app"
+cd "$app"
 echo "$example"
 
 # inside COMMAND...: runs COMMAND in a container of this example.

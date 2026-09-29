@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, ensure};
+use tracing::warn;
+
+use crate::constants::REPO_CONFIG_FILES;
 
 /// The top of the git work tree around the current directory.
 pub fn root() -> anyhow::Result<PathBuf> {
@@ -19,8 +22,63 @@ pub fn root() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(root.trim_end()))
 }
 
+/// The repository's configuration file: the first of `REPO_CONFIG_FILES`
+/// present at the root, if any. Others present are ignored, with a warning.
+pub fn config_file(root: &Path) -> Option<PathBuf> {
+    let present: Vec<&str> = REPO_CONFIG_FILES
+        .into_iter()
+        .filter(|name| root.join(name).is_file())
+        .collect();
+    let (chosen, ignored) = present.split_first()?;
+    if !ignored.is_empty() {
+        warn!("using {chosen}; ignoring {}", ignored.join(", "));
+    }
+    Some(root.join(chosen))
+}
+
 pub fn dir_name(root: &Path) -> String {
     root.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)] // unit__scenario__expected test names
+mod tests {
+    use super::*;
+
+    fn root_with(files: &[&str]) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        for file in files {
+            std::fs::write(root.path().join(file), "").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn config_file__precedence() {
+        let cases: [(&[&str], &str); 4] = [
+            (&["vz.yml"], "vz.yml"),
+            (&["vz.yaml", "vz.yml"], "vz.yml"),
+            (&["vz.yml", "viz-shell.yaml"], "viz-shell.yaml"),
+            (
+                &["vz.yaml", "vz.yml", "viz-shell.yaml", "viz-shell.yml"],
+                "viz-shell.yml",
+            ),
+        ];
+        for (files, expected) in cases {
+            let root = root_with(files);
+
+            let chosen = config_file(root.path()).unwrap();
+
+            assert_eq!(chosen, root.path().join(expected), "files: {files:?}");
+        }
+    }
+
+    #[test]
+    fn config_file__none__is_none() {
+        let root = root_with(&[]);
+
+        assert_eq!(config_file(root.path()), None);
+    }
 }

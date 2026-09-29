@@ -1,0 +1,36 @@
+# The global configuration: what every repository starts from. viz-shell wrote
+# it on its first run and never overwrites it: edit it freely. A repository's own configuration comes on
+# top: its root over this root, its profiles over these of the same name.
+# Relative paths here are relative to this folder.
+
+# The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
+image: debian:stable-slim
+
+env:
+  files:
+    # Variables for every repository; skipped while the file does not exist.
+    - environment
+  passthrough:
+    - EDITOR
+
+# A mount must exist on the host, or vz refuses to start: uncomment what you have.
+# mounts:
+#   - ~/.gitconfig          # your git identity, read-only
+
+profiles:
+  # `vz --profile trusted`: for repositories you trust. A repository extends it
+  # with its own `trusted:`, or with `extends: trusted` in another profile.
+  trusted:
+    share:
+      # The host's docker daemon: root-equivalent control of the host.
+      docker: true
+    mounts:
+      # ssh as on the host: keys readable inside.
+      - ~/.ssh
+    env:
+      files:
+        # Secrets only trusted mode sees; skipped while the file does not exist.
+        - trusted.env
+      passthrough:
+        - GH_TOKEN
+    # Coming with the privileges work: sudo, and the capability settings.
