@@ -12,6 +12,7 @@ Linux first, shell first, no editor required
 - [Your user in the image](#your-user-in-the-image)
 - [State](#state)
 - [Mounts](#mounts)
+- [Profiles](#profiles)
 - [Examples](#examples)
 - [Logging](#logging)
 - [Test](#test)
@@ -32,6 +33,8 @@ because `vz` mounts itself into every container it starts: build it anywhere, ru
 vz                  # a shell: bash, else sh
 vz -- cargo test    # one command instead
 vz -c other.yml     # another configuration: -c, --config-file
+vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
+vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
 ```
 
 `vz` reads `vz.yml` at the git root, or the `-c` file, pulls or builds the image if missing, and runs a container
@@ -104,13 +107,11 @@ Container paths whose contents survive the container. Each is kept in the state 
 at the git root by default, at its own container path and mounted back; the host's own files are untouched.
 
 ```yaml
-state_dir: .vz_state                     # optional: the state folder, see below
-state:
-  - ~/.local/share/opencode              # folder: the short form
-  - /var/cache/apt                       # any absolute path
-  - path: ~/.config/opencode/opencode.json
-    type: file
-    init: "{}"                           # created with "{}" the first time
+state_dir: .vz_state                                     # optional: the state folder, see below
+state:                                                   # keyed by container path
+  ~/.local/share/opencode: dir                           # a folder; `true` means the same
+  /var/cache/apt: dir                                    # any absolute path
+  ~/.config/opencode/opencode.json: { type: file, init: "{}" }  # a file, "{}" the first time
 ```
 
 | Entry | Inside | Kept at |
@@ -118,7 +119,8 @@ state:
 | `~/.local/share/opencode` | `/home/sally/.local/share/opencode` | `.vz_state/home/sally/.local/share/opencode` |
 | `/var/cache/apt` | `/var/cache/apt` | `.vz_state/var/cache/apt` |
 
-- `type`: `dir` (default) or `file`. `init`: a file's content when `vz` creates it; never rewritten.
+- Values: `dir` or `true`, `file`, `{ type, init }`, or `false` (none: for profiles).
+  `init` is a file's content when `vz` creates it; never rewritten.
 - `state_dir`: relative to the `vz.yml`'s folder, `~/…` or absolute. Without it every configuration,
   `-c` ones included, shares `.vz_state/` at the git root.
 - `vz` creates missing entries as you. Delete the state folder to start over; ignoring it in git is up to you,
@@ -133,19 +135,39 @@ state:
 Host paths shown at the same path inside, reusing the host's own files.
 
 ```yaml
-mounts:
-  - ~/repos            # read-only, the default
-  - ~/.gitconfig:ro    # read-only, spelled out
-  - ~/.config/gh:rw    # read-write
+mounts:                # keyed by host path
+  ~/repos: ro          # read-only; `true` means the same
+  ~/.config/gh: rw     # read-write
 ```
-
-The suffix follows docker's `-v`; any other suffix is refused. The full form works too:
-`- { path: ~/.config/gh, mode: rw }`, or as a block mapping.
 
 - The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
   deeper mounts land on top.
 - A mount must exist on the host; `vz` never creates one.
 - Paths follow the state rules; a mount may not overlap a state path.
+
+## Profiles
+
+Named layers on top of the root of `vz.yml`, each with the same keys. Choose one with
+`vz --profile NAME` or `VZ_PROFILE=NAME`; plain `vz` uses the root alone.
+
+```yaml
+mounts:
+  ~/repos: ro
+
+profiles:
+  writable:
+    mounts: { ~/repos: rw }     # overrides the root's entry
+  isolated:
+    mounts: { ~/repos: false }  # removes it
+  scratch:
+    extends: isolated           # starts from isolated
+    state: { ~/scratch: dir }   # and adds its own
+```
+
+- A later layer wins per field and per key: root, then the `extends` chain, then the profile.
+- `false` removes an entry; on the root it is simply nothing.
+- Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
+- `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
 
 ## Examples
 
@@ -159,6 +181,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
 | [`state`](examples/state) | folders, a file with `init`, absolute paths |
 | [`mounts`](examples/mounts) | read-only `~/repos`, a read-write config folder, a single file |
+| [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
 
 ## Logging
 

@@ -6,15 +6,15 @@ image: debian:stable-slim
 # its own, next to this file, so its test starts from a clean slate.
 state_dir: .vz_state
 
-state:
-  # A folder, the short form: kept at <state_dir>/home/<you>/.local/share/opencode
-  - ~/.local/share/opencode
+state:                                  # keyed by container path
+  # A folder: kept at <state_dir>/home/<you>/.local/share/opencode
+  ~/.local/share/opencode: dir
   # A file, created with its init content the first time, never rewritten.
-  - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }
+  ~/.config/opencode/opencode.json: { type: file, init: "{}" }
   # Shell history, kept in a folder: point HISTFILE into it.
-  - ~/.local/state/bash
-  # Caches of language tools.
-  - ~/.cache/pip
-  - ~/.npm
+  ~/.local/state/bash: dir
+  # Caches of language tools; `true` is a folder too.
+  ~/.cache/pip: true
+  ~/.npm: true
   # Any absolute path, too: kept at <state_dir>/opt/data
-  - /opt/data
+  /opt/data: dir

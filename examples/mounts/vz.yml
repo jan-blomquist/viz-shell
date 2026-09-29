@@ -2,11 +2,11 @@
 # the host's own files; each must exist on the host.
 image: debian:stable-slim
 
-mounts:
-  # Read-only, the default: every repository, for reading and grepping.
+mounts:                                 # keyed by host path: ro | rw | true (ro) | false
+  # Every repository, read-only, for reading and grepping.
   # The repository vz runs for stays read-write inside it.
-  - ~/repos
-  # Read-write, docker style: the gh CLI's login, shared with the host.
-  - ~/.config/gh:rw
-  # Your git identity, read-only, spelled out.
-  - ~/.gitconfig:ro
+  ~/repos: ro
+  # The gh CLI's login, shared with the host, read-write.
+  ~/.config/gh: rw
+  # Your git identity, read-only.
+  ~/.gitconfig: ro

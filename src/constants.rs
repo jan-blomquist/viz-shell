@@ -1,6 +1,9 @@
 /// The repository configuration file, at the repository root.
 pub const REPO_CONFIG_FILE: &str = "vz.yml";
 
+/// Selects a profile when `--profile` is not given; CI sets it once.
+pub const PROFILE_ENV: &str = "VZ_PROFILE";
+
 /// Our own variable rather than `RUST_LOG`, which the repository's
 /// tools may set for themselves.
 pub const LOG_ENV: &str = "VZ_LOG";

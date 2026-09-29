@@ -1,0 +1,26 @@
+# Profiles: named layers on top of this file's root, chosen with
+# `vz --profile NAME` or VZ_PROFILE=NAME. A later layer wins per key;
+# `false` removes an entry.
+image: debian:stable-slim
+state_dir: .vz_state
+
+# The root: what plain `vz` runs with.
+mounts:
+  ~/repos: ro
+
+profiles:
+  # The same mount, now read-write.
+  writable:
+    mounts:
+      ~/repos: rw
+
+  # The mount removed.
+  isolated:
+    mounts:
+      ~/repos: false
+
+  # Everything `isolated` does, plus a scratch folder that survives.
+  scratch:
+    extends: isolated
+    state:
+      ~/scratch: dir

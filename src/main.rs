@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
         Some(Internal::Entrypoint { command }) => entrypoint::run(&command),
         None => {
             let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
-            let exit_code = runtime.block_on(launch(cli.config_file.as_deref(), &cli.command))?;
+            let exit_code = runtime.block_on(launch(&cli))?;
             std::process::exit(exit_code);
         }
     }
@@ -45,21 +45,36 @@ fn main() -> anyhow::Result<()> {
 
 /// Starts the repository's container and runs the shell, or `command`, in it
 /// as the host user; returns the exit code.
-async fn launch(config_file: Option<&Path>, command: &[String]) -> anyhow::Result<i32> {
+async fn launch(cli: &Cli) -> anyhow::Result<i32> {
     ensure!(
         cfg!(target_env = "musl"),
         "vz mounts itself into the container, so it must be a static musl build: \
          cargo build --target x86_64-unknown-linux-musl"
     );
     let repo_root = repo::root()?;
-    let config_file = match config_file {
+    let config_file = match &cli.config_file {
         Some(file) => {
             std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?
         }
         None => repo_root.join(REPO_CONFIG_FILE),
     };
-    let config = RepoConfig::load(&config_file)?;
-    debug!("read {}: {config:?}", config_file.display());
+    let config = RepoConfig::load(&config_file)?
+        .effective(cli.profile.as_deref())
+        .with_context(|| format!("in {}", config_file.display()))?;
+    if cli.show_effective_config {
+        let profile = cli
+            .profile
+            .as_deref()
+            .map(|name| format!(", profile {name}"))
+            .unwrap_or_default();
+        println!(
+            "# effective configuration of {}{profile}",
+            config_file.display()
+        );
+        print!("{}", config.to_yaml()?);
+        return Ok(0);
+    }
+    debug!("effective configuration: {config:?}");
     // Paths in the configuration are relative to its folder.
     let config_dir = config_file.parent().unwrap_or(&repo_root).to_owned();
     let user = User::of_host()?;
@@ -90,7 +105,7 @@ async fn launch(config_file: Option<&Path>, command: &[String]) -> anyhow::Resul
         state: &state,
         mounts: &mounts,
         passthrough: &passthrough_env(),
-        command,
+        command: &cli.command,
         tty: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
     };
     engine.run(session.run_command()).await

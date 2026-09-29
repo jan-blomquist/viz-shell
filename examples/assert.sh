@@ -23,6 +23,8 @@ rm -rf "$HOME" && mkdir -p "$HOME"
 # Every run starts with no state.
 rm -rf "$example_dir/.vz_state"
 export VZ_LOG=${VZ_LOG:-warn}
+# A profile from the caller's shell would change every test.
+unset VZ_PROFILE
 
 cd "$repo_root"
 echo "$example"
