@@ -4,7 +4,7 @@ capabilities and sidecars; a host file declares what it grants.
 One static Rust binary applies both to a Docker or Podman container, on a laptop, an agent host or a CI runner. 
 Linux first, shell first, no editor required
 
-> Early MVP: `vz` runs the image named in `vz.yml` to completion and prints its output.
+> Early MVP: `vz` pulls or builds the image in `vz.yml`, runs it to completion and prints its output.
 
 ## Build
 
@@ -19,17 +19,35 @@ Build it inside a container, run it on any Linux host.
 
 ## Use
 
-`vz.yml` in the current directory:
+`vz.yml` in the current directory names an image to pull:
 
 ```yaml
 image: hello-world
 ```
 
+or a Dockerfile to build:
+
+```yaml
+image:
+  dockerfile: Dockerfile
+  context: .                  # optional, default: the current directory
+  args: { GREETING: hello }   # optional build args
+```
+
 ```sh
-vz    # pulls the image if missing, runs it, removes the container
+vz    # pulls or builds the image if missing, runs it, removes the container
 ```
 
 `vz` exits with the container's exit code.
+
+A built image is tagged `vz-<directory>:<hash of the Dockerfile and args>`,
+and builds only when that tag is missing. Editing the Dockerfile or args rebuilds;
+editing a file the Dockerfile copies does not. Remove the image to force a rebuild.
+`vz` drives the engine through the `docker` CLI, via
+[docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
+so builds honour `.dockerignore`.
+
+This repository's own `Dockerfile` is the Rust toolchain with `vz` built from the checkout.
 
 Unknown keys in `vz.yml` are refused, naming the line.
 
@@ -38,8 +56,8 @@ Unknown keys in `vz.yml` are refused, naming the line.
 Logs go to stderr, filtered by `VZ_LOG` (default `warn,vz=info`):
 
 ```sh
-VZ_LOG=vz=debug vz    # each engine step
-VZ_LOG=debug vz       # includes bollard and hyper
+VZ_LOG=vz=debug vz    # each step, and every docker command in full
+VZ_LOG=debug vz       # also docker-wrapper's spans: each CLI call, its exit code and output size
 ```
 
 ## Test

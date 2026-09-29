@@ -1,1 +1,2 @@
-image: hello-world
+image:
+  dockerfile: Dockerfile

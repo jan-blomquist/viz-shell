@@ -1,104 +1,97 @@
-use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
-use anyhow::{Context, bail};
-use bollard::Docker;
-use bollard::errors::Error as BollardError;
-use bollard::models::ContainerCreateBody;
-use bollard::query_parameters::{
-    CreateImageOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-};
-use futures_util::{StreamExt, TryStreamExt};
-use log::{debug, info};
+use anyhow::{Context, bail, ensure};
+use docker_wrapper::{DockerCommand, InspectCommand, PullCommand, RunCommand, ensure_docker};
+use tracing::{debug, info, instrument};
 
-/// The container engine, reached through the Docker API.
-pub struct Engine {
-    docker: Docker,
-}
+use crate::build::BuildPlan;
+use crate::constants::DOCKER_CLI;
+
+/// The container engine, driven through the docker CLI. Only `detect`
+/// makes one, so every engine has passed its checks.
+pub struct Engine(());
 
 impl Engine {
-    /// Connects through `DOCKER_HOST`, or the default socket when it is unset.
-    pub fn connect() -> anyhow::Result<Self> {
-        let docker = Docker::connect_with_defaults().context("connecting to the docker engine")?;
-        debug!("connected to the docker engine");
-        Ok(Self { docker })
-    }
-
-    /// Runs `image` to completion, copies its output to `out`, removes the
-    /// container, and returns the container's exit code.
-    pub async fn run(&self, image: &str, out: &mut impl Write) -> anyhow::Result<i64> {
-        self.pull_if_missing(image).await?;
-        let body = ContainerCreateBody {
-            image: Some(image.to_owned()),
-            ..Default::default()
+    /// Fails, naming the fix, unless the docker CLI is on `PATH`, recent
+    /// enough, and reaches a running daemon.
+    pub async fn detect() -> anyhow::Result<Self> {
+        let info = match ensure_docker().await {
+            Ok(info) => info,
+            Err(docker_wrapper::Error::DockerNotFound) => bail!(
+                "the {DOCKER_CLI} CLI is not on PATH; vz runs every engine operation through it. \
+                 Install Docker: https://docs.docker.com/engine/install/"
+            ),
+            Err(error) => return Err(error).context(format!("checking the {DOCKER_CLI} CLI")),
         };
-        let id = self
-            .docker
-            .create_container(None, body)
-            .await
-            .context("creating the container")?
-            .id;
-        debug!("created container {id} from {image}");
-
-        let outcome = self.start_and_follow(&id, out).await;
-        self.docker
-            .remove_container(
-                &id,
-                Some(RemoveContainerOptionsBuilder::default().force(true).build()),
-            )
-            .await
-            .context("removing the container")?;
-        debug!("removed container {id}");
-        outcome
+        if !info.daemon_running {
+            bail!(
+                "{} cannot reach the docker daemon; start it, or check DOCKER_HOST and `docker context ls`",
+                info.binary_path
+            );
+        }
+        debug!(
+            "{} {}, daemon {}",
+            info.binary_path,
+            info.version.version,
+            info.server_version
+                .map(|version| version.version)
+                .unwrap_or_default()
+        );
+        Ok(Self(()))
     }
 
-    async fn pull_if_missing(&self, image: &str) -> anyhow::Result<()> {
-        if self.docker.inspect_image(image).await.is_ok() {
-            debug!("image {image} is present");
-            return Ok(());
-        }
+    pub async fn has_image(&self, image: &str) -> bool {
+        InspectCommand::new(image)
+            .object_type("image")
+            .execute()
+            .await
+            .is_ok()
+    }
+
+    #[instrument(skip(self))]
+    pub async fn pull(&self, image: &str) -> anyhow::Result<()> {
         info!("pulling {image}");
-        let options = CreateImageOptionsBuilder::default()
-            .from_image(image)
-            .build();
-        self.docker
-            .create_image(Some(options), None, None)
-            .try_collect::<Vec<_>>()
+        PullCommand::new(image)
+            .execute()
             .await
             .with_context(|| format!("pulling {image}"))?;
         Ok(())
     }
 
-    async fn start_and_follow(&self, id: &str, out: &mut impl Write) -> anyhow::Result<i64> {
-        self.docker
-            .start_container(id, None)
-            .await
-            .context("starting the container")?;
-        debug!("started container {id}");
-
-        let options = LogsOptionsBuilder::default()
-            .follow(true)
-            .stdout(true)
-            .stderr(true)
-            .build();
-        let mut logs = self.docker.logs(id, Some(options));
-        while let Some(chunk) = logs.next().await {
-            out.write_all(&chunk.context("reading container output")?.into_bytes())?;
-        }
-
-        let code = self.exit_code(id).await?;
-        debug!("container {id} exited with {code}");
-        Ok(code)
+    #[instrument(skip_all, fields(tag = %plan.tag))]
+    pub async fn build(&self, plan: &BuildPlan) -> anyhow::Result<()> {
+        info!("building {}", plan.tag);
+        let status = attached(plan.command().build_command_args()).await?;
+        ensure!(status.success(), "building {} failed: {status}", plan.tag);
+        Ok(())
     }
 
-    /// Bollard reports a non-zero exit as an error; here it is just the exit code.
-    async fn exit_code(&self, id: &str) -> anyhow::Result<i64> {
-        match self.docker.wait_container(id, None).try_next().await {
-            Ok(Some(response)) => Ok(response.status_code),
-            Ok(None) => bail!("container {id} ended without an exit status"),
-            Err(BollardError::DockerContainerWaitError { code, .. }) => Ok(code),
-            Err(error) => Err(error).context("waiting for the container"),
-        }
+    /// Runs `image`, which must be present, to completion in a container
+    /// that is removed afterwards, and returns the container's exit code.
+    #[instrument(skip(self))]
+    pub async fn run(&self, image: &str) -> anyhow::Result<i32> {
+        let status = attached(RunCommand::new(image).remove().build_command_args()).await?;
+        Ok(exit_code(status))
     }
+}
+
+/// Runs the docker CLI on this terminal: docker-wrapper's own `execute`
+/// captures output, which hides build progress and cannot carry a TTY.
+async fn attached(args: Vec<String>) -> anyhow::Result<ExitStatus> {
+    debug!("{DOCKER_CLI} {}", args.join(" "));
+    tokio::process::Command::new(DOCKER_CLI)
+        .args(&args)
+        .status()
+        .await
+        .with_context(|| format!("running {DOCKER_CLI}"))
+}
+
+/// A shell's convention: a process killed by a signal exits with 128 + signal.
+fn exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -106,15 +99,26 @@ impl Engine {
 mod tests {
     use super::*;
 
+    #[test]
+    fn exit_code__exits_and_signals() {
+        let cases = [
+            (ExitStatus::from_raw(0), 0),
+            (ExitStatus::from_raw(3 << 8), 3),
+            (ExitStatus::from_raw(9), 137),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(exit_code(status), expected, "status: {status:?}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "needs a docker engine"]
-    async fn run__hello_world__exits_zero_and_prints_greeting() {
-        let engine = Engine::connect().unwrap();
-        let mut output = Vec::new();
+    async fn run__hello_world__exits_zero() {
+        let engine = Engine::detect().await.unwrap();
+        engine.pull("hello-world:latest").await.unwrap();
 
-        let exit_code = engine.run("hello-world:latest", &mut output).await.unwrap();
+        let exit_code = engine.run("hello-world:latest").await.unwrap();
 
         assert_eq!(exit_code, 0);
-        assert!(String::from_utf8_lossy(&output).contains("Hello from Docker!"));
     }
 }
