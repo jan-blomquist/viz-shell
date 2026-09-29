@@ -130,12 +130,9 @@ fn content_hash(dockerfile_text: &str, args: &BTreeMap<String, String>) -> Strin
         hasher.update([0]);
         hasher.update(value);
     }
-    let hex: String = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    hex[..CONTENT_HASH_LEN].to_owned()
+    let mut hex = hex::encode(hasher.finalize());
+    hex.truncate(CONTENT_HASH_LEN);
+    hex
 }
 
 #[cfg(test)]

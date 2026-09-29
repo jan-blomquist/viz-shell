@@ -210,33 +210,10 @@ fn refuse_tracked(path: &Path, repo_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `*` matches any run of characters, `?` any one.
+/// `*` matches any run of characters, `?` any one. The configuration
+/// allows no other glob syntax, so every pattern compiles.
 fn glob_matches(pattern: &str, name: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let name: Vec<char> = name.chars().collect();
-    let (mut p, mut n) = (0, 0);
-    let mut backtrack: Option<(usize, usize)> = None;
-    while n < name.len() {
-        match pattern.get(p) {
-            Some('*') => {
-                backtrack = Some((p, n));
-                p += 1;
-            }
-            Some(&c) if c == '?' || c == name[n] => {
-                p += 1;
-                n += 1;
-            }
-            _ => match backtrack {
-                Some((star, matched)) => {
-                    p = star + 1;
-                    n = matched + 1;
-                    backtrack = Some((star, matched + 1));
-                }
-                None => return false,
-            },
-        }
-    }
-    pattern[p..].iter().all(|&c| c == '*')
+    glob::Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(name))
 }
 
 #[cfg(test)]

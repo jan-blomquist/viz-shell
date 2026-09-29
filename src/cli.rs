@@ -17,7 +17,7 @@ pub struct Cli {
     pub config_file: Option<PathBuf>,
 
     /// A profile from vz.yml, applied on top of its root
-    #[arg(long, env = PROFILE_ENV)]
+    #[arg(long, env = PROFILE_ENV, global = true)]
     pub profile: Option<String>,
 
     /// Print the configuration vz would run with, as YAML, and exit
@@ -26,7 +26,7 @@ pub struct Cli {
 
     /// Set a variable inside, over every other source: KEY=VALUE, or KEY to
     /// copy the host's; repeatable
-    #[arg(short = 'e', long = "env", value_name = "KEY[=VALUE]")]
+    #[arg(short = 'e', long = "env", value_name = "KEY[=VALUE]", global = true)]
     pub env: Vec<String>,
 
     /// Print the environment's variable names and where each comes from, never
@@ -41,11 +41,53 @@ pub struct Cli {
 
 #[derive(Debug, PartialEq, Subcommand)]
 pub enum Action {
+    /// Start a named container: `vz new api`, then `vz attach api`
+    New {
+        name: String,
+        /// A command to run instead of the shell
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Attach to a container of this repository, by index or name; without
+    /// one, to the only one running
+    #[command(visible_alias = "at")]
+    Attach {
+        /// An index, as in vz-0-app, or a name from `vz new`
+        target: Option<String>,
+        /// A command to run instead of the shell
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// List this repository's containers
+    Ls {
+        /// Every repository's
+        #[arg(long)]
+        all: bool,
+    },
+    /// Remove containers of this repository, by index or name
+    Kill {
+        /// Indexes, as in vz-0-app, or names from `vz new`
+        #[arg(required_unless_present = "all")]
+        targets: Vec<String>,
+        /// Every container of this repository
+        #[arg(long, conflicts_with = "targets")]
+        all: bool,
+    },
     /// List the profiles of the global and the repository configuration
     Profiles,
-    /// Inside the container: add the host user, then run the command as it
+    /// Inside the container: add the host user, then run the command as it,
+    /// or hold for shells to attach
     #[command(hide = true)]
     Entrypoint {
+        #[arg(long, conflicts_with = "command")]
+        hold: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+    /// Inside the container: once the entrypoint is ready, become the host
+    /// user and run the command
+    #[command(hide = true)]
+    Enter {
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -115,8 +157,75 @@ mod tests {
         let cli = Cli::try_parse_from(["vz", "entrypoint", "--", "bash", "-l"]).unwrap();
 
         let expected = Action::Entrypoint {
+            hold: false,
             command: strings(&["bash", "-l"]),
         };
         assert_eq!(cli.action, Some(expected));
+    }
+
+    #[test]
+    fn parse__sessions__each_command() {
+        let cases: [(&[&str], Action); 7] = [
+            (
+                &["vz", "new", "api"],
+                Action::New {
+                    name: "api".to_owned(),
+                    command: vec![],
+                },
+            ),
+            (
+                &["vz", "new", "api", "--", "cargo", "test"],
+                Action::New {
+                    name: "api".to_owned(),
+                    command: strings(&["cargo", "test"]),
+                },
+            ),
+            (
+                &["vz", "attach"],
+                Action::Attach {
+                    target: None,
+                    command: vec![],
+                },
+            ),
+            (
+                &["vz", "at", "1", "--", "id"],
+                Action::Attach {
+                    target: Some("1".to_owned()),
+                    command: strings(&["id"]),
+                },
+            ),
+            (&["vz", "ls", "--all"], Action::Ls { all: true }),
+            (
+                &["vz", "kill", "0", "api"],
+                Action::Kill {
+                    targets: strings(&["0", "api"]),
+                    all: false,
+                },
+            ),
+            (
+                &["vz", "kill", "--all"],
+                Action::Kill {
+                    targets: vec![],
+                    all: true,
+                },
+            ),
+        ];
+        for (args, expected) in cases {
+            let cli = Cli::try_parse_from(args).unwrap();
+
+            assert_eq!(cli.action, Some(expected), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn parse__kill_without_targets__refused() {
+        assert!(Cli::try_parse_from(["vz", "kill"]).is_err());
+    }
+
+    #[test]
+    fn parse__profile_after_the_subcommand__applies() {
+        let cli = Cli::try_parse_from(["vz", "attach", "0", "--profile", "trusted"]).unwrap();
+
+        assert_eq!(cli.profile.as_deref(), Some("trusted"));
     }
 }

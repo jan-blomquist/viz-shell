@@ -1,13 +1,15 @@
-//! The `docker run` for a session: the repository at the same path as on the
-//! host, the host's working directory, the state and host mounts, and the
-//! host user, recreated by the entrypoint from the launcher's own binary.
+//! The `docker create` for a session: the repository at the same path as on
+//! the host, the host's working directory, the state and host mounts, and the
+//! host user, recreated by the entrypoint from the launcher's own binary. And
+//! the `docker exec` that attaches to one.
 
 use std::path::{Path, PathBuf};
 
-use docker_wrapper::{DockerCommand, RunCommand};
+use docker_wrapper::{DockerCommand, ExecCommand, RunCommand};
 
 use crate::constants::{
-    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SHELL_ENV, SUDO_ENV,
+    CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES, NO_NEW_PRIVILEGES, SESSION_DIR, SHELL_ENV,
+    SUDO_ENV,
 };
 use crate::mounts::HostMount;
 use crate::share::DockerSocket;
@@ -15,6 +17,12 @@ use crate::state::StateMount;
 use crate::user::User;
 
 pub struct Session<'a> {
+    /// The container's name, and its hostname.
+    pub name: &'a str,
+    pub labels: &'a [(String, String)],
+    /// Kept after the creating shell exits: the container holds, and every
+    /// shell attaches, the first included.
+    pub persistent: bool,
     pub image: &'a str,
     pub repo_root: &'a Path,
     pub workdir: &'a Path,
@@ -30,7 +38,7 @@ pub struct Session<'a> {
     /// The configured environment's names: passed as `--env NAME`, their
     /// values only in the docker CLI's own environment.
     pub env_names: &'a [String],
-    /// Empty for the shell.
+    /// Empty for the shell. Unused when persistent: the shell attaches.
     pub command: &'a [String],
     /// Whether stdin and stdout are a terminal.
     pub tty: bool,
@@ -44,39 +52,44 @@ pub struct Session<'a> {
 }
 
 impl Session<'_> {
-    /// `docker run`'s arguments. docker-wrapper writes every `--env` as
-    /// `NAME=VALUE`; the configured environment goes in as bare names, right
-    /// after `run`, so values never reach a command line or a log.
-    pub fn run_args(&self) -> Vec<String> {
+    /// `docker create`'s arguments: those of `docker run`, which takes the
+    /// same, under another name.
+    pub fn create_args(&self) -> Vec<String> {
         let mut args = self.run_command().build_command_args();
-        let names = self
-            .env_names
-            .iter()
-            .flat_map(|name| ["--env".to_owned(), name.clone()]);
-        args.splice(1..1, names);
-        args
+        args[0] = "create".to_owned();
+        with_env_names(args, self.env_names)
     }
 
     fn run_command(&self) -> RunCommand {
-        let entrypoint_args = ["entrypoint", "--"]
-            .into_iter()
-            .map(str::to_owned)
-            .chain(self.command.iter().cloned())
-            .collect();
+        let entrypoint_args: Vec<String> = match self.persistent {
+            true => vec!["entrypoint".to_owned(), "--hold".to_owned()],
+            false => ["entrypoint", "--"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(self.command.iter().cloned())
+                .collect(),
+        };
         let mut run = RunCommand::new(self.image)
-            .remove()
+            .name(self.name)
+            .hostname(self.name)
             .init()
-            .interactive()
             .user(CONTAINER_ROOT)
             .entrypoint(ENTRYPOINT_PATH)
             .workdir(self.workdir)
+            .tmpfs(SESSION_DIR)
             .cmd(entrypoint_args);
+        run = self.labels.iter().fold(run, |run, (label, value)| {
+            run.label(format!("{label}={value}"))
+        });
         run = self
             .binds()
             .iter()
             .fold(run, |run, bind| run.mount(bind.to_mount_arg()));
-        if self.tty {
-            run = run.tty();
+        if !self.persistent {
+            run = run.remove().interactive();
+            if self.tty {
+                run = run.tty();
+            }
         }
         if self.host_network {
             run = run.network("host");
@@ -105,6 +118,52 @@ impl Session<'_> {
         env.iter()
             .fold(run, |run, (name, value)| run.env(name, value))
     }
+}
+
+/// The `docker exec` that attaches a shell, or a command, to a running
+/// container: vz's own binary, which waits for the entrypoint's setup, then
+/// becomes the user.
+pub struct Enter<'a> {
+    pub container: &'a str,
+    pub workdir: &'a Path,
+    pub tty: bool,
+    pub passthrough: &'a [(String, String)],
+    /// As for `Session`: by name, values in the docker CLI's environment.
+    pub env_names: &'a [String],
+    /// Empty for the shell.
+    pub command: &'a [String],
+}
+
+impl Enter<'_> {
+    pub fn args(&self) -> Vec<String> {
+        let command = [ENTRYPOINT_PATH, "enter", "--"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(self.command.iter().cloned())
+            .collect();
+        let mut exec = ExecCommand::new(self.container, command)
+            .interactive()
+            .workdir(self.workdir);
+        if self.tty {
+            exec = exec.tty();
+        }
+        exec = self
+            .passthrough
+            .iter()
+            .fold(exec, |exec, (name, value)| exec.env(name, value));
+        with_env_names(exec.build_command_args(), self.env_names)
+    }
+}
+
+/// docker-wrapper writes every `--env` as `NAME=VALUE`; the configured
+/// environment goes in as bare names, right after the subcommand, so values
+/// never reach a command line or a log.
+fn with_env_names(mut args: Vec<String>, env_names: &[String]) -> Vec<String> {
+    let names = env_names
+        .iter()
+        .flat_map(|name| ["--env".to_owned(), name.clone()]);
+    args.splice(1..1, names);
+    args
 }
 
 impl Session<'_> {
@@ -248,7 +307,11 @@ mod tests {
         };
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
         let env_names = ["GH_TOKEN".to_owned()];
+        let labels = [("vz.index".to_owned(), "0".to_owned())];
         let mut session = Session {
+            name: "vz-0-vz",
+            labels: &labels,
+            persistent: false,
             image: "vz-vz:abc",
             repo_root: Path::new("/home/sally/repos/vz"),
             workdir: Path::new("/home/sally/repos/vz/src"),
@@ -266,7 +329,7 @@ mod tests {
             shell: None,
         };
         configure(&mut session);
-        session.run_args()
+        session.create_args()
     }
 
     fn has(args: &[String], flag: &str, value: &str) -> bool {
@@ -359,6 +422,7 @@ mod tests {
             .unwrap();
 
             let expected = Action::Entrypoint {
+                hold: false,
                 command: command.clone(),
             };
             assert_eq!(cli.action, Some(expected), "command: {command:?}");
@@ -374,7 +438,7 @@ mod tests {
             !args.iter().any(|arg| arg.starts_with("GH_TOKEN=")),
             "{args:?}"
         );
-        assert_eq!(&args[..3], ["run", "--env", "GH_TOKEN"]);
+        assert_eq!(&args[..3], ["create", "--env", "GH_TOKEN"]);
     }
 
     #[test]
@@ -458,6 +522,101 @@ mod tests {
 
         assert!(has(&shared, "--network", "host"), "{shared:?}");
         assert!(!default.iter().any(|arg| arg == "--network"), "{default:?}");
+    }
+
+    #[test]
+    fn create_args__any_session__named_labeled_with_a_fresh_session_dir() {
+        let args = args_for(&[], true);
+
+        assert!(has(&args, "--name", "vz-0-vz"), "{args:?}");
+        assert!(has(&args, "--hostname", "vz-0-vz"), "{args:?}");
+        assert!(has(&args, "--label", "vz.index=0"), "{args:?}");
+        assert!(has(&args, "--tmpfs", "/run/viz-shell/session"), "{args:?}");
+    }
+
+    #[test]
+    fn create_args__not_persistent__removed_on_exit_running_the_command() {
+        let args = args_for(&["id".to_owned()], true);
+
+        for flag in ["--rm", "--interactive", "--tty"] {
+            assert!(args.iter().any(|arg| arg == flag), "{flag}: {args:?}");
+        }
+        assert_eq!(args[args.len() - 3..], ["entrypoint", "--", "id"]);
+    }
+
+    #[test]
+    fn create_args__persistent__kept_holding_for_shells_to_attach() {
+        let args = args_configured(&["id".to_owned()], true, false, false, |session| {
+            session.persistent = true
+        });
+
+        for flag in ["--rm", "--interactive", "--tty"] {
+            assert!(!args.iter().any(|arg| arg == flag), "{flag}: {args:?}");
+        }
+        assert_eq!(
+            args[args.len() - 3..],
+            ["vz-vz:abc", "entrypoint", "--hold"]
+        );
+    }
+
+    #[test]
+    fn enter_args__command__vz_enters_the_container_as_the_user() {
+        let passthrough = [("TERM".to_owned(), "xterm".to_owned())];
+        let env_names = ["GH_TOKEN".to_owned()];
+        let command = ["id".to_owned(), "-u".to_owned()];
+        let enter = Enter {
+            container: "vz-0-vz",
+            workdir: Path::new("/home/sally/repos/vz"),
+            tty: true,
+            passthrough: &passthrough,
+            env_names: &env_names,
+            command: &command,
+        };
+
+        let args = enter.args();
+
+        assert_eq!(&args[..3], ["exec", "--env", "GH_TOKEN"]);
+        assert!(has(&args, "--env", "TERM=xterm"), "{args:?}");
+        assert!(has(&args, "--workdir", "/home/sally/repos/vz"), "{args:?}");
+        assert!(args.iter().any(|arg| arg == "--tty"), "{args:?}");
+        let tail = &args[args.len() - 6..];
+        assert_eq!(
+            tail,
+            [
+                "vz-0-vz",
+                "/run/viz-shell/viz-shell",
+                "enter",
+                "--",
+                "id",
+                "-u"
+            ]
+        );
+    }
+
+    /// The exec's arguments after the binary parse back into `enter`.
+    #[test]
+    fn enter_args__after_the_binary__parse_as_enter() {
+        let command = ["cargo".to_owned(), "test".to_owned(), "--".to_owned()];
+        let enter = Enter {
+            container: "vz-0-vz",
+            workdir: Path::new("/"),
+            tty: false,
+            passthrough: &[],
+            env_names: &[],
+            command: &command,
+        };
+        let args = enter.args();
+        let after_binary = args.iter().position(|arg| arg == ENTRYPOINT_PATH).unwrap() + 1;
+
+        let cli = Cli::try_parse_from(
+            std::iter::once("vz".to_owned()).chain(args[after_binary..].iter().cloned()),
+        )
+        .unwrap();
+
+        let expected = Action::Enter {
+            command: command.to_vec(),
+        };
+        assert_eq!(cli.action, Some(expected));
     }
 
     #[test]

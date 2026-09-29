@@ -8,6 +8,7 @@ Linux first, shell first, no editor required
 
 - [Build](#build)
 - [Use](#use)
+- [Sessions](#sessions)
 - [Images](#images)
 - [Your user in the image](#your-user-in-the-image)
 - [State](#state)
@@ -42,11 +43,15 @@ vz -c other.yml     # another configuration: -c, --config-file
 vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
 vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
 vz profiles         # the profiles of the global and the repository configuration
+vz new api          # a container named api; see Sessions
+vz attach 0         # a shell in container 0 of this repository; or `vz at api`
+vz ls               # this repository's containers; --all for every repository's
+vz kill 0 api       # removes containers; --all for all of this repository's
 ```
 
 `vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
-`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or builds the image if missing, and runs a container
-that is removed on exit; `vz` exits with its exit code. Inside:
+`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or builds the image if missing, and runs a container,
+removed on exit unless `persistent`; `vz` exits with the shell's, or the command's, exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
@@ -57,11 +62,13 @@ manner of fastfetch: what the shell is about to be. Colored on a terminal, unles
 The environment shows as a count, never names or values.
 
 ```
-       _              _          _ _    sally@app
-__   _(_)____     ___| |__   ___| | |   ---------
-\ \ / / |_  /____/ __| '_ \ / _ \ | |   Repo: ~/repos/app
- \ V /| |/ /_____\__ \ | | |  __/ | |   Branch: main
-  \_/ |_/___|    |___/_| |_|\___|_|_|   Config: global.yml, viz-shell.yml
+       _              _          _ _    sally@vz-0-app
+__   _(_)____     ___| |__   ___| | |   --------------
+\ \ / / |_  /____/ __| '_ \ / _ \ | |   Version: 0.1.0
+ \ V /| |/ /_____\__ \ | | |  __/ | |   Session: new, removed on exit
+  \_/ |_/___|    |___/_| |_|\___|_|_|   Repo: ~/repos/app
+                                        Branch: main
+                                        Config: global.yml, viz-shell.yml
                                         Profile: trusted
                                         Image: vz-app:3f9c2a1b7d4e8f60
                                         Shell: fish
@@ -88,6 +95,36 @@ state:
 ```
 
 Unknown keys in `vz.yml` are refused, naming the line.
+
+## Sessions
+
+Every container is named `vz-<index>-<repository>`, its hostname too, so your prompt says which one
+you are in. The index is the lowest free one of the repository's containers; `vz new api` adds a
+name: `vz-1-app-api`. Labels (`vz.repo`, `vz.index`, `vz.name`, `vz.profile`, …) identify them:
+`vz ls`, `vz attach` and `vz kill` look containers up by label, by index or name.
+
+```yaml
+persistent: true    # the container outlives the shell that created it; `vz kill` removes it
+attach: true        # a plain `vz` joins this repository's container of the same profile
+```
+
+| `persistent` | `attach` | `vz` | the creating shell exits | the next `vz` |
+|---|---|---|---|---|
+| false | false | a new container | it is removed | another new one |
+| true | false | a new container | it is kept | another new one |
+| true | true | a new container, or joins the kept one | it is kept | joins it |
+| false | true | a new container, or joins the running one | it is removed, with attached shells | joins it |
+
+- `vz attach [INDEX|NAME] [-- COMMAND]` (or `vz at`) runs a shell, or the command, in a container
+  of this repository, as you; without a target, in the only running one. A stopped persistent
+  container is started. `attach: true` joins unnamed containers only; a named one is attached by name.
+- A container is entered only with its own profile: `vz attach 0` to a container started with
+  `--profile trusted` is refused, naming `vz --profile trusted attach 0`. A plain `vz` never lands in
+  a trusted container.
+- A container keeps the configuration it was created with; attaching after a change warns, and
+  `vz kill` then `vz` applies it.
+- Attaching is `docker exec` of vz's own binary: it waits for the entrypoint to finish setting you up,
+  then becomes you, as the entrypoint does.
 
 ## Images
 
@@ -288,7 +325,7 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 - An entry is a bare path or name for the common case, or expanded for anything else.
 - An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
   a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
-- Settings (`image`, `state_dir`, `banner`, `shell`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
+- Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`, `share`, `privileges`) are replaced; `env.defaults` merges per variable name.
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
@@ -297,7 +334,7 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 
 `~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
 configuration, and every repository starts from it. The first `vz` writes it from
-[`templates/global.yml`](templates/global.yml) when there is none, and never overwrites it: an untrusted
+its built-in default (`DEFAULT_GLOBAL` in [`src/config.rs`](src/config.rs)) when there is none, and never overwrites it: an untrusted
 default with the banner on, and a `trusted` profile with sudo, docker, the host's network, `~/.ssh` and trusted-only
 secrets. Edit it freely.
 
@@ -342,6 +379,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`privileges`](examples/privileges) | the secure floor by default; sudo in a profile; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |
+| [`sessions`](examples/sessions) | named containers, persistent ones, attach by index, name or `attach: true`, kill |
 
 ## Logging
 

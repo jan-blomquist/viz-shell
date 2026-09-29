@@ -3,21 +3,36 @@
 
 use std::path::Path;
 
+use anstyle::{AnsiColor, Style};
+
 use crate::config::tilde;
 use crate::mounts::HostMount;
 
-const ART: &str = include_str!("../templates/banner.txt");
+/// `figlet viz-shell`.
+const ART: [&str; 5] = [
+    r"       _              _          _ _",
+    r"__   _(_)____     ___| |__   ___| | |",
+    r"\ \ / / |_  /____/ __| '_ \ / _ \ | |",
+    r" \ V /| |/ /_____\__ \ | | |  __/ | |",
+    r"  \_/ |_/___|    |___/_| |_|\___|_|_|",
+];
+
+/// This build: the version in Cargo.toml.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Between the art and the facts.
 const GAP: &str = "   ";
 
-const COLOR: &str = "\x1b[36m";
-const BOLD_COLOR: &str = "\x1b[1;36m";
-const RESET: &str = "\x1b[0m";
+const ART_STYLE: Style = AnsiColor::Cyan.on_default();
+const KEY_STYLE: Style = AnsiColor::Cyan.on_default().bold();
 
 /// What the banner reports: the session vz is about to start.
 pub struct Session<'a> {
     pub user: &'a str,
+    /// The container's name, which is its hostname too.
+    pub container: &'a str,
+    /// `new, removed on exit`, `attached`, …
+    pub state: &'a str,
     pub home: &'a Path,
     pub repo_root: &'a Path,
     pub branch: Option<&'a str>,
@@ -37,14 +52,9 @@ pub struct Session<'a> {
     pub env_vars: usize,
 }
 
-/// The title, `user@repository`.
+/// The title, `user@container`: the prompt's `user@hostname`.
 pub fn title(session: &Session) -> String {
-    let repo = session
-        .repo_root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    format!("{}@{repo}", session.user)
+    format!("{}@{}", session.user, session.container)
 }
 
 /// One `(key, value)` per line under the title.
@@ -78,7 +88,11 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         1 => "1 variable".to_owned(),
         vars => format!("{vars} variables"),
     };
-    let mut facts = vec![("Repo", tilde(session.repo_root, home))];
+    let mut facts = vec![
+        ("Version", VERSION.to_owned()),
+        ("Session", session.state.to_owned()),
+        ("Repo", tilde(session.repo_root, home)),
+    ];
     if let Some(branch) = session.branch {
         facts.push(("Branch", branch.to_owned()));
     }
@@ -114,32 +128,30 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
     facts
 }
 
-/// The art, and beside it the title, a rule, and the facts; colored for a terminal.
-pub fn render(title: &str, facts: &[(&str, String)], color: bool) -> String {
-    let paint = |code: &str, text: &str| match color {
-        true => format!("{code}{text}{RESET}"),
-        false => text.to_owned(),
-    };
-    let art: Vec<&str> = ART.lines().collect();
-    let art_width = art
+/// The art, and beside it the title, a rule, and the facts; styled. Print it
+/// through `anstream`, which drops the styles where they don't belong: off a
+/// terminal, or with `NO_COLOR`.
+pub fn render(title: &str, facts: &[(&str, String)]) -> String {
+    let paint = |style: &Style, text: &str| format!("{style}{text}{style:#}");
+    let art_width = ART
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(0);
-    let right: Vec<String> = [paint(BOLD_COLOR, title), "-".repeat(title.chars().count())]
+    let right: Vec<String> = [paint(&KEY_STYLE, title), "-".repeat(title.chars().count())]
         .into_iter()
         .chain(
             facts
                 .iter()
-                .map(|(key, value)| format!("{}: {value}", paint(BOLD_COLOR, key))),
+                .map(|(key, value)| format!("{}: {value}", paint(&KEY_STYLE, key))),
         )
         .collect();
     let mut banner = String::new();
-    for row in 0..art.len().max(right.len()) {
-        let left = format!("{:art_width$}", art.get(row).unwrap_or(&""));
+    for row in 0..ART.len().max(right.len()) {
+        let left = format!("{:art_width$}", ART.get(row).unwrap_or(&""));
         let line = match right.get(row) {
-            Some(fact) => format!("{}{GAP}{fact}", paint(COLOR, &left)),
-            None => paint(COLOR, left.trim_end()),
+            Some(fact) => format!("{}{GAP}{fact}", paint(&ART_STYLE, &left)),
+            None => paint(&ART_STYLE, left.trim_end()),
         };
         banner.push_str(line.trim_end());
         banner.push('\n');
@@ -158,6 +170,8 @@ mod tests {
     fn session<'a>(mounts: &'a [HostMount], files: &'a [&'a Path]) -> Session<'a> {
         Session {
             user: "sally",
+            container: "vz-0-app",
+            state: "new, removed on exit",
             home: Path::new("/home/sally"),
             repo_root: Path::new("/home/sally/repos/app"),
             branch: Some("main"),
@@ -195,6 +209,8 @@ mod tests {
         let facts = facts(&session(&mounts, &files));
 
         let expected = [
+            ("Version", VERSION),
+            ("Session", "new, removed on exit"),
             ("Repo", "~/repos/app"),
             ("Branch", "main"),
             ("Config", "global.yml, viz-shell.yml"),
@@ -250,18 +266,22 @@ mod tests {
     }
 
     #[test]
+    fn title__session__user_at_the_container() {
+        assert_eq!(title(&session(&[], &[])), "sally@vz-0-app");
+    }
+
+    #[test]
     fn render__facts__beside_the_art_title_first() {
         let facts = [("Repo", "~/repos/app".to_owned())];
 
-        let banner = render("sally@app", &facts, false);
+        let banner = anstream::adapter::strip_str(&render("sally@app", &facts)).to_string();
 
         let lines: Vec<&str> = banner.lines().collect();
-        let art: Vec<&str> = ART.lines().collect();
-        let column = art.iter().map(|line| line.len()).max().unwrap() + GAP.len();
+        let column = ART.iter().map(|line| line.len()).max().unwrap() + GAP.len();
         assert_eq!(&lines[0][column..], "sally@app");
         assert_eq!(&lines[1][column..], "---------");
         assert_eq!(&lines[2][column..], "Repo: ~/repos/app");
-        assert_eq!(lines[3], art[3].trim_end());
+        assert_eq!(lines[3], ART[3].trim_end());
         assert!(banner.ends_with("\n\n"), "{banner}");
         assert!(!banner.contains('\x1b'), "{banner}");
     }
@@ -270,9 +290,9 @@ mod tests {
     fn render__color__art_and_keys_colored() {
         let facts = [("Repo", "~/repos/app".to_owned())];
 
-        let banner = render("sally@app", &facts, true);
+        let banner = render("sally@app", &facts);
 
-        assert!(banner.contains(&format!("{BOLD_COLOR}Repo{RESET}: ~/repos/app")));
-        assert!(banner.starts_with(COLOR), "{banner}");
+        assert!(banner.contains(&format!("{KEY_STYLE}Repo{KEY_STYLE:#}: ~/repos/app")));
+        assert!(banner.starts_with(&ART_STYLE.to_string()), "{banner}");
     }
 }
