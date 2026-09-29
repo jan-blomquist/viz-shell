@@ -1508,6 +1508,7 @@ mounts:
 
     /// The recipes in `examples/`, the repository's own configuration and the
     /// global template stay valid as the schema changes, with every profile.
+    /// A folder with neither kind of file is skipped.
     #[test]
     fn load__every_example_and_the_repository_file__resolves_with_each_profile() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1519,12 +1520,12 @@ mounts:
             .chain([root.to_owned(), root.join("templates")])
             .collect();
         for dir in dirs {
-            let read = |name: &str| {
-                let file = dir.join(name);
-                file.is_file()
-                    .then(|| Layer::load(&file, home, root).unwrap_or_else(|e| panic!("{e:#}")))
+            let read = |file: Option<PathBuf>| {
+                file.map(|file| Layer::load(&file, home, root).unwrap_or_else(|e| panic!("{e:#}")))
             };
-            let (global, repo) = (read("global.yml"), read("vz.yml"));
+            // The repository file by the same precedence vz uses.
+            let global_file = Some(dir.join("global.yml")).filter(|file| file.is_file());
+            let (global, repo) = (read(global_file), read(crate::repo::config_file(&dir)));
             if global.is_none() && repo.is_none() {
                 continue;
             }
