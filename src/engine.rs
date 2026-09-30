@@ -86,6 +86,9 @@ impl Engine {
     #[instrument(skip_all, fields(tag = %plan.tag))]
     pub async fn build(&self, plan: &BuildPlan) -> anyhow::Result<()> {
         info!("building {}", plan.tag);
+        if let Some(base) = plan.base() {
+            debug!("on {base}");
+        }
         let status = attached(plan.command().build_command_args(), &[]).await?;
         ensure!(status.success(), "building {} failed: {status}", plan.tag);
         Ok(())

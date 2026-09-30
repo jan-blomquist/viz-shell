@@ -1,0 +1,18 @@
+# Image stacking: a Dockerfile that declares `ARG BASE` is built on the image
+# of the layers below it; one without it, or an image reference, replaces.
+image:
+  dockerfile: base.Dockerfile
+
+profiles:
+  tools:                          # base, then tools on it
+    image: { dockerfile: tools.Dockerfile }
+  alone:                          # alone only
+    image: { dockerfile: alone.Dockerfile }
+  pulled:                         # the reference only
+    image: debian:stable-slim
+  pulled-tools:                   # tools on the reference
+    extends: pulled
+    image: { dockerfile: tools.Dockerfile }
+  deep:                           # base, tools, then alone replaces both
+    extends: tools
+    image: { dockerfile: alone.Dockerfile }

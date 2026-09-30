@@ -22,9 +22,9 @@ use clap::Parser;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::build::BuildPlan;
+use crate::build::ImageStep;
 use crate::cli::{Action, Cli};
-use crate::config::{Config, ConfigFile, ImageSource, Layer};
+use crate::config::{Config, ConfigFile, Layer};
 use crate::constants::{
     CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
     ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
@@ -251,6 +251,9 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     );
     if cli.show_effective_config {
         println!("# effective configuration of {header}");
+        for line in build::describe(&config.images, &loaded.repo_root, &loaded.user.home) {
+            println!("# image: {line}");
+        }
         print!("{}", config.to_yaml()?);
         return Ok(0);
     }
@@ -342,42 +345,44 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         env_names: &env_names,
         command,
     };
-    let show_banner = |container: &str, image: &str, attached: bool, persistent: bool| {
-        if !(config.banner && command.is_empty() && tty) {
-            return;
-        }
-        let branch = repo::branch(&repo_root);
-        let config_files: Vec<(ConfigFile, &Path)> = config_files
-            .iter()
-            .map(|(file, path)| (*file, path.as_path()))
-            .collect();
-        let facts = banner::Session {
-            user: &user.name,
-            container,
-            attached,
-            persistent,
-            home: &user.home,
-            repo_root: &repo_root,
-            branch: branch.as_deref(),
-            config_files: &config_files,
-            profile,
-            image,
-            shell: config.shell.as_deref(),
-            sudo: config.privileges.sudo,
-            docker: docker.as_ref().map(|socket| socket.path.as_path()),
-            host_network: config.share.host_network,
-            mounts: &mounts,
-            state_paths: state.len(),
-            state_dir: &state_dir,
-            env_vars: environment.len(),
-            create_hooks: config.hooks.create.len(),
-            attach_hooks: config.hooks.attach.len(),
+    let show_banner =
+        |container: &str, image: &str, image_bases: &[&str], attached: bool, persistent: bool| {
+            if !(config.banner && command.is_empty() && tty) {
+                return;
+            }
+            let branch = repo::branch(&repo_root);
+            let config_files: Vec<(ConfigFile, &Path)> = config_files
+                .iter()
+                .map(|(file, path)| (*file, path.as_path()))
+                .collect();
+            let facts = banner::Session {
+                user: &user.name,
+                container,
+                attached,
+                persistent,
+                home: &user.home,
+                repo_root: &repo_root,
+                branch: branch.as_deref(),
+                config_files: &config_files,
+                profile,
+                image,
+                image_bases,
+                shell: config.shell.as_deref(),
+                sudo: config.privileges.sudo,
+                docker: docker.as_ref().map(|socket| socket.path.as_path()),
+                host_network: config.share.host_network,
+                mounts: &mounts,
+                state_paths: state.len(),
+                state_dir: &state_dir,
+                env_vars: environment.len(),
+                create_hooks: config.hooks.create.len(),
+                attach_hooks: config.hooks.attach.len(),
+            };
+            anstream::print!(
+                "{}",
+                banner::render(&banner::title(&facts), &banner::facts(&facts))
+            );
         };
-        anstream::print!(
-            "{}",
-            banner::render(&banner::title(&facts), &banner::facts(&facts))
-        );
-    };
     let values: Vec<(String, String)> = environment
         .iter()
         .map(|(name, var)| (name.clone(), var.value.clone()))
@@ -398,6 +403,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         show_banner(
             &container.name,
             &container.image,
+            &[],
             true,
             container.persistent,
         );
@@ -406,7 +412,11 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
 
     state::create_sources(&state)?;
     mounts::create_points_in_state(&mounts)?;
-    let image = prepare_image(&engine, &config.image, &config_dir, &repo_root, &user).await?;
+    let steps = build::plan(&config.images, &config_dir, &user)?;
+    prepare_image(&engine, &steps).await?;
+    let (top, below) = steps.split_last().expect("an image chain has a top");
+    let image = top.tag().to_owned();
+    let image_bases: Vec<&str> = below.iter().rev().map(ImageStep::tag).collect();
     let session_name = match how {
         Launch::New(name) => Some(name),
         _ => None,
@@ -455,10 +465,10 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     };
     if config.persistent {
         engine.start(&name).await?;
-        show_banner(&name, &image, false, true);
+        show_banner(&name, &image, &image_bases, false, true);
         engine.exec(enter(&name).args(), &values).await
     } else {
-        show_banner(&name, &image, false, false);
+        show_banner(&name, &image, &image_bases, false, false);
         engine.start_attached(&name).await
     }
 }
@@ -572,31 +582,27 @@ fn print_env(header: &str, environment: &env::Environment) {
     );
 }
 
-/// Pulls or builds the image unless the engine already has it, and returns
-/// its reference.
-async fn prepare_image(
-    engine: &Engine,
-    source: &ImageSource,
-    config_dir: &Path,
-    repo_root: &Path,
-    user: &User,
-) -> anyhow::Result<String> {
-    let (image, plan) = match source {
-        ImageSource::Reference(reference) => (config::with_default_tag(reference), None),
-        ImageSource::Build(spec) => {
-            let plan = BuildPlan::load(spec, config_dir, &repo::dir_name(repo_root), user)?;
-            (plan.tag.clone(), Some(plan))
+/// Makes the top image of the chain unless the engine has it: builds each
+/// image below it the engine lacks, bottom first, then the top; pulls the
+/// top when it is a reference. A build pulls what it stands on itself.
+async fn prepare_image(engine: &Engine, steps: &[ImageStep]) -> anyhow::Result<()> {
+    let (top, below) = steps.split_last().expect("an image chain has a top");
+    if engine.has_image(top.tag()).await {
+        debug!("image {} is present", top.tag());
+        return Ok(());
+    }
+    for step in below {
+        if let ImageStep::Build(plan) = step {
+            match engine.has_image(&plan.tag).await {
+                true => debug!("image {} is present", plan.tag),
+                false => engine.build(plan).await?,
+            }
         }
-    };
-    if engine.has_image(&image).await {
-        debug!("image {image} is present");
-        return Ok(image);
     }
-    match plan {
-        Some(plan) => engine.build(&plan).await?,
-        None => engine.pull(&image).await?,
+    match top {
+        ImageStep::Pull(reference) => engine.pull(reference).await,
+        ImageStep::Build(plan) => engine.build(plan).await,
     }
-    Ok(image)
 }
 
 fn passthrough_env() -> Vec<(String, String)> {

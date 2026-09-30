@@ -260,13 +260,23 @@ image:                        # build; paths relative to the vz.yml's folder
   args: { GREETING: hello }   # optional
 ```
 
-- A built image is tagged `vz-<dir>:<hash of Dockerfile + args>` and builds only when missing.
+- A built image is tagged `vz-<Dockerfile's folder>:<hash of Dockerfile + args>` and builds only
+  when missing. One Dockerfile used by many repositories, say from the global configuration, is one image.
   Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
 - Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
   so `.dockerignore` applies.
 - This repository's `Dockerfile`: `viz-shell-base` (below), plus the Rust toolchain, fish as its
   shell, and `vz` built from the checkout. Run `just build-base-images` once before its first
   `vz`.
+
+**Stacking.** A Dockerfile that declares `ARG BASE` (`ARG BASE=<default>`, then `FROM ${BASE}`, as
+below) is built on the image the earlier layers resolved to: vz pulls or builds that one first, then
+passes `--build-arg BASE=<its tag>`. Layers apply in order, global root, repository root, local root,
+then the profile's `extends` chain, so a later layer's Dockerfile lands on top. The base's tag joins
+the hash: a new base rebuilds what stacks on it. With no earlier image, the default applies. A
+Dockerfile without `ARG BASE`, `BASE` set in `args`, or an image reference replaces.
+`--show-effective-config` lists the chain, each image marked `stacks` or `replaces`; the banner shows
+`Image: vz-app:3f9c2a1b (on vz-tools:9a1c0d2e, debian:stable-slim)`.
 
 **What an image needs.** Official images like `debian`, `alpine`, `rust`, `node` or `python` already
 meet the contract. For your own images:
@@ -542,7 +552,8 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
   earlier one in its place; a new one comes last. `enabled: false` removes one. A key twice in one
   list is refused.
 - Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`) are replaced; `share` and
-  `privileges` per key, `env.defaults` per variable name.
+  `privileges` per key, `env.defaults` per variable name. An `image:` Dockerfile with `ARG BASE`
+  stacks instead: see [Images](#images).
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
 - `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
@@ -596,6 +607,8 @@ env:
   `trusted:` adds to the repository's and the global one.
 - Meant to be ignored by git: add `*.local.yml` to `.gitignore`, or to your global gitignore. `vz`
   warns when it is tracked.
+- It may define its own profiles, selected with `--profile` like any other, and its own `image:`:
+  a personal Dockerfile with `ARG BASE` stacks on the repository's image.
 - A local file alone is no configuration: it needs a repository or a global one.
 - `--show-effective-config` names it and lists its layers: `local root`, `local <profile>`.
 
@@ -608,6 +621,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 |---|---|
 | [`pull-image`](examples/pull-image) | the smallest `vz.yml` |
 | [`build-dockerfile`](examples/build-dockerfile) | building from a Dockerfile, with args |
+| [`image-stack`](examples/image-stack) | `ARG BASE` stacking on a built image and on a reference, replacing Dockerfiles, images named by their folder |
 | [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
 | [`state`](examples/state) | folders, a file with `init`, absolute paths |
 | [`mounts`](examples/mounts) | the `path[:target][:ro\|rw]` string form: read-only `~/repos`, a read-write config folder, a single file, one source at several targets, a mount inside state, a mount on the repository skipped |
@@ -615,7 +629,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 | [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight, the `TERM` fallback |
 | [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
-| [`local`](examples/local) | a local overlay over the repository's file: a value, a mount's mode, an added mount, a profile; the warning when it is tracked |
+| [`local`](examples/local) | a local overlay over the repository's file: a value, a mount's mode, an added mount, a profile, a profile of its own; the warning when it is tracked |
 | [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in a profile; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |

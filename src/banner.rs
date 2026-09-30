@@ -40,6 +40,8 @@ pub struct Session<'a> {
     pub config_files: &'a [(ConfigFile, &'a Path)],
     pub profile: Option<&'a str>,
     pub image: &'a str,
+    /// The images it is built on, the nearest first.
+    pub image_bases: &'a [&'a str],
     pub shell: Option<&'a str>,
     pub sudo: bool,
     /// The host's docker socket, when shared.
@@ -125,7 +127,13 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
     facts.extend([
         ("Config", or_none(file_names.join(", "))),
         ("Profile", session.profile.unwrap_or("none").to_owned()),
-        ("Image", session.image.to_owned()),
+        (
+            "Image",
+            match session.image_bases {
+                [] => session.image.to_owned(),
+                bases => format!("{} (on {})", session.image, bases.join(", ")),
+            },
+        ),
         (
             "Shell",
             session.shell.unwrap_or("bash (else sh)").to_owned(),
@@ -198,6 +206,7 @@ mod tests {
             config_files: files,
             profile: Some("trusted"),
             image: "vz-app:0123456789abcdef",
+            image_bases: &[],
             shell: Some("fish"),
             sudo: true,
             docker: Some(Path::new("/run/user/1000/docker.sock")),
@@ -354,6 +363,33 @@ mod tests {
                 value, expected,
                 "create {create_hooks}, attach {attach_hooks}"
             );
+        }
+    }
+
+    #[test]
+    fn facts__image__top_then_its_bases_nearest_first() {
+        let cases: [(&[&str], &str); 3] = [
+            (&[], "vz-app:3f9c2a1b"),
+            (
+                &["debian:stable-slim"],
+                "vz-app:3f9c2a1b (on debian:stable-slim)",
+            ),
+            (
+                &["vz-tools:9a1c0d2e", "debian:stable-slim"],
+                "vz-app:3f9c2a1b (on vz-tools:9a1c0d2e, debian:stable-slim)",
+            ),
+        ];
+        for (image_bases, expected) in cases {
+            let session = Session {
+                image: "vz-app:3f9c2a1b",
+                image_bases,
+                ..session(&[], &[])
+            };
+
+            let facts = facts(&session);
+
+            let (_, value) = facts.iter().find(|(key, _)| *key == "Image").unwrap();
+            assert_eq!(value, expected);
         }
     }
 

@@ -12,6 +12,8 @@ expect_success "the local mode wins: ~/shared is writable" inside touch "$HOME/s
 expect_output "the local file adds its own mount" "mine" inside cat "$HOME/mine/note"
 expect_output "a local profile merges over the repository's" "local-extra" \
     with_profile extra sh -c 'echo "$WHO"'
+expect_output "a profile only the local file defines is selectable" "mine" \
+    with_profile mine sh -c 'echo "$WHO"'
 show_config() { "$vz_bin" -c "$example_dir/vz.yml" --show-effective-config; }
 expect_contains "--show-effective-config names the local file" "local $example_dir/vz.local.yml" show_config
 expect_contains "and lists its layers" "local root" show_config

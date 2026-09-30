@@ -44,10 +44,13 @@ pub const DEFAULT_BUILD_CONTEXT: &str = ".";
 /// The engine's CLI, which vz runs for every engine operation.
 pub const DOCKER_CLI: &str = "docker";
 
-/// Built images are named `vz-<repository directory>:<content hash>`.
+/// Built images are named `vz-<the Dockerfile's folder>:<content hash>`.
 pub const BUILT_IMAGE_PREFIX: &str = "vz-";
 
-/// The image name when the repository directory has no usable characters.
+/// The build arg of a Dockerfile that stacks on the image below it.
+pub const BASE_ARG: &str = "BASE";
+
+/// The image name when the Dockerfile's folder has no usable characters.
 pub const FALLBACK_IMAGE_NAME: &str = "repo";
 
 /// Hex digits of the content hash kept in a built image's tag.

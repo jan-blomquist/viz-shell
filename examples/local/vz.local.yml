@@ -14,3 +14,7 @@ profiles:
     env:
       defaults:
         WHO: local-extra
+  mine:                           # a profile only this file defines
+    env:
+      defaults:
+        WHO: mine

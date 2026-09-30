@@ -609,7 +609,9 @@ impl Keyed for MountItem {
 pub struct EffectiveConfig {
     /// The layers applied, in order: `global root`, `repo trusted`, …
     pub layers: Vec<String>,
-    pub image: ImageSource,
+    /// Every `image:` of the layers applied, bottom first; one set again
+    /// right above itself counts once. Never empty.
+    pub images: Vec<ImageSource>,
     pub state_dir: Option<String>,
     pub banner: bool,
     pub shell: Option<String>,
@@ -700,7 +702,8 @@ impl Config {
 
     /// Global root, repo root, local root, then for each profile of the
     /// chosen one's chain, from its start: its global, repo and local
-    /// sections. Later layers win per field and per key.
+    /// sections. Later layers win per field and per key; every `image:` is
+    /// kept, in order, for the plan to stack or replace.
     pub fn effective(&self, profile: Option<&str>) -> anyhow::Result<EffectiveConfig> {
         let chain = match profile {
             Some(name) => self.chain(name)?,
@@ -728,7 +731,12 @@ impl Config {
                 .map(|(_, file, _)| *file)
                 .expect("an effective mount comes from a layer")
         };
-        let mut effective = EffectiveConfig::resolve(merged, mount_file)?;
+        let mut images: Vec<ImageSource> = layers
+            .iter()
+            .filter_map(|(_, _, layer)| layer.image.clone())
+            .collect();
+        images.dedup();
+        let mut effective = EffectiveConfig::resolve(merged, images, mount_file)?;
         effective.layers = layers.into_iter().map(|(label, _, _)| label).collect();
         Ok(effective)
     }
@@ -1029,10 +1037,16 @@ pub fn is_env_name(name: &str) -> bool {
 
 impl EffectiveConfig {
     /// `mount_file` names the file that set a mount last, by its key.
-    fn resolve(layer: Layer, mount_file: impl Fn(&str) -> ConfigFile) -> anyhow::Result<Self> {
-        let image = layer
-            .image
-            .context("no image: set `image:` in the global or the repository configuration")?;
+    /// `images`: every `image:` of the layers, bottom first.
+    fn resolve(
+        layer: Layer,
+        images: Vec<ImageSource>,
+        mount_file: impl Fn(&str) -> ConfigFile,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            layer.image.is_some(),
+            "no image: set `image:` in the global or the repository configuration"
+        );
         let state = layer
             .state
             .iter()
@@ -1071,7 +1085,7 @@ impl EffectiveConfig {
             .collect();
         Ok(Self {
             layers: Vec::new(),
-            image,
+            images,
             state_dir: layer.state_dir,
             banner: layer.banner.unwrap_or(false),
             shell: layer.shell,
@@ -1174,8 +1188,16 @@ impl EffectiveHooks {
 }
 
 impl EffectiveConfig {
+    /// The top of the image chain: the image of the last layer that set one.
+    pub fn image(&self) -> &ImageSource {
+        self.images
+            .last()
+            .expect("an effective configuration has an image")
+    }
+
     /// As a `vz.yml` without profiles: every entry in its shortest form that
     /// says the same, so it parses back to the same configuration.
+    /// Only the top image: `--show-effective-config` lists the chain above.
     pub fn to_yaml(&self) -> anyhow::Result<String> {
         serde_saphyr::to_string(&self.to_layer()).context("writing the effective configuration")
     }
@@ -1207,7 +1229,7 @@ impl EffectiveConfig {
             })
             .collect();
         Layer {
-            image: Some(self.image.clone()),
+            image: Some(self.image().clone()),
             state_dir: self.state_dir.clone(),
             banner: self.banner.then_some(true),
             shell: self.shell.clone(),
@@ -1378,7 +1400,7 @@ profiles:
         let config = effective("image: hello-world\n", None);
 
         assert_eq!(
-            config.image,
+            *config.image(),
             ImageSource::Reference("hello-world".to_owned())
         );
     }
@@ -1392,7 +1414,7 @@ profiles:
             context: PathBuf::from("."),
             args: BTreeMap::new(),
         };
-        assert_eq!(config.image, ImageSource::Build(expected));
+        assert_eq!(*config.image(), ImageSource::Build(expected));
     }
 
     #[test]
@@ -1480,7 +1502,10 @@ mounts:
                 "repo bare".to_owned(),
                 "repo bare-alpine".to_owned(),
             ],
-            image: ImageSource::Reference("alpine".to_owned()),
+            images: vec![
+                ImageSource::Reference("debian".to_owned()),
+                ImageSource::Reference("alpine".to_owned()),
+            ],
             state_dir: None,
             banner: false,
             shell: None,
@@ -1906,7 +1931,7 @@ profiles:
 
         let config = effective(text, Some("ci"));
 
-        assert_eq!(config.image, ImageSource::Reference("alpine".to_owned()));
+        assert_eq!(*config.image(), ImageSource::Reference("alpine".to_owned()));
     }
 
     #[test]
@@ -2461,7 +2486,7 @@ profiles:
         let config = both(GLOBAL, REPO).effective(None).unwrap();
 
         assert_eq!(config.layers, ["global root", "repo root"]);
-        assert_eq!(config.image, ImageSource::Reference("debian".to_owned()));
+        assert_eq!(*config.image(), ImageSource::Reference("debian".to_owned()));
         assert_eq!(who(&config), "repo");
     }
 
@@ -2665,6 +2690,82 @@ profiles:
                 .collect();
             assert_eq!(mounts, expected_mounts, "{profile:?}");
         }
+    }
+
+    #[test]
+    fn effective__images_in_every_file__chain_kept_in_layer_order() {
+        let global =
+            "image: debian\nprofiles:\n  base:\n    image: { dockerfile: base.Dockerfile }\n";
+        let repo = "image: { dockerfile: Dockerfile }\nprofiles:\n  tools:\n    extends: base\n    \
+                    image: { dockerfile: tools.Dockerfile }\n";
+        let local =
+            "image: { dockerfile: mine.Dockerfile }\nprofiles:\n  tools:\n    image: alpine\n";
+        let config = all_three(global, repo, local);
+        let debian = || ImageSource::Reference("debian".to_owned());
+        let build = |path: &str| {
+            ImageSource::Build(BuildSpec {
+                dockerfile: PathBuf::from(path),
+                context: PathBuf::from(path).parent().unwrap().to_owned(),
+                args: BTreeMap::new(),
+            })
+        };
+        let global_dir = "/home/sally/.config/viz-shell";
+        let roots = || {
+            vec![
+                debian(),
+                build(&format!("{APP}/Dockerfile")),
+                build(&format!("{APP}/mine.Dockerfile")),
+            ]
+        };
+        let cases = [
+            (None, roots()),
+            (
+                Some("base"),
+                [
+                    roots(),
+                    vec![build(&format!("{global_dir}/base.Dockerfile"))],
+                ]
+                .concat(),
+            ),
+            (
+                Some("tools"),
+                [
+                    roots(),
+                    vec![
+                        build(&format!("{global_dir}/base.Dockerfile")),
+                        build(&format!("{APP}/tools.Dockerfile")),
+                        ImageSource::Reference("alpine".to_owned()),
+                    ],
+                ]
+                .concat(),
+            ),
+        ];
+        for (profile, expected) in cases {
+            let effective = config.effective(profile).unwrap();
+
+            assert_eq!(effective.images, expected, "{profile:?}");
+            assert_eq!(effective.image(), expected.last().unwrap(), "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn effective__same_image_set_again__counts_once() {
+        let text = "image: debian\nprofiles:\n  p:\n    image: debian\n";
+
+        let config = effective(text, Some("p"));
+
+        assert_eq!(config.images, [ImageSource::Reference("debian".to_owned())]);
+    }
+
+    #[test]
+    fn to_yaml__image_chain__only_the_top_image() {
+        let text = "image: debian\nprofiles:\n  p:\n    image: { dockerfile: Dockerfile }\n";
+
+        let yaml = effective(text, Some("p")).to_yaml().unwrap();
+
+        assert_eq!(yaml.matches("image:").count(), 1, "{yaml}");
+        assert!(!yaml.contains("debian"), "{yaml}");
+        assert_eq!(effective(&yaml, None).images.len(), 1, "{yaml}");
     }
 
     #[test]
