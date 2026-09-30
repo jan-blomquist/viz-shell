@@ -245,25 +245,25 @@ mod tests {
         let file_source = root.path().join("AGENTS.md");
         std::fs::create_dir(&dir_source).unwrap();
         std::fs::write(&file_source, "orientation").unwrap();
-        let state = root.path().join("state/home/sally/.claude");
+        let state = root.path().join("state/home/sally/.config/opencode");
         let mount = |source: &Path, name: &str| HostMount {
             source: source.to_owned(),
-            target: PathBuf::from("/home/sally/.claude").join(name),
+            target: PathBuf::from("/home/sally/.config/opencode").join(name),
             read_only: true,
             point_in_state: Some(state.join(name)),
         };
         let mounts = [
             mount(&dir_source, "skills"),
-            mount(&file_source, "CLAUDE.md"),
+            mount(&file_source, "AGENTS.md"),
         ];
 
         create_points_in_state(&mounts).unwrap();
-        std::fs::write(state.join("CLAUDE.md"), "kept").unwrap();
+        std::fs::write(state.join("AGENTS.md"), "kept").unwrap();
         create_points_in_state(&mounts).unwrap();
 
         assert!(state.join("skills").is_dir());
         assert_eq!(
-            std::fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
+            std::fs::read_to_string(state.join("AGENTS.md")).unwrap(),
             "kept"
         );
     }
