@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A local overlay: vz.local.yml over vz.yml, root and profile alike.
+# A local overlay: vz.local.yml over vz.yml, default and profile alike.
 source "$(dirname "$0")/../assert.sh"
 # This example's local file is tracked on purpose: its warning, checked last, stays out of the rest.
 export VZ_LOG=error
@@ -16,7 +16,7 @@ expect_output "a profile only the local file defines is selectable" "mine" \
     with_profile mine sh -c 'echo "$WHO"'
 show_config() { "$vz_bin" -c "$example_dir/vz.yml" --show-effective-config; }
 expect_contains "--show-effective-config names the local file" "local $example_dir/vz.local.yml" show_config
-expect_contains "and lists its layers" "local root" show_config
+expect_contains "and shows its cells in the grid" "# default: global, repository, local" show_config
 tracked_warning() { VZ_LOG=warn inside true 2>&1 >/dev/null; }
 expect_contains "a tracked local file is used, with a warning" \
     "vz.local.yml is tracked by git: it is meant to be personal" tracked_warning

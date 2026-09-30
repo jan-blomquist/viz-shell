@@ -18,7 +18,7 @@ use anyhow::Context;
 use docker_wrapper::BuildCommand;
 use sha2::{Digest, Sha256};
 
-use crate::config::{self, BuildSpec, ImageSource};
+use crate::config::{self, BuildSpec, ImageLayer, ImageSource};
 use crate::constants::{BASE_ARG, BUILT_IMAGE_PREFIX, CONTENT_HASH_LEN, FALLBACK_IMAGE_NAME};
 use crate::user::User;
 
@@ -154,27 +154,34 @@ fn declares_base(dockerfile_text: &str) -> bool {
     declared_args(dockerfile_text).contains(BASE_ARG)
 }
 
-/// One line per image of the chain, bottom first, with what each does to
-/// the ones below: `debian:stable-slim`, `~/tools/Dockerfile (ARG BASE:
-/// stacks)`, `Dockerfile (replaces)`.
-pub fn describe(chain: &[ImageSource], config_dir: &Path, home: &Path) -> Vec<String> {
+/// One line per image of the chain, bottom first, with the cell that set it
+/// and what it does to the ones below: `debian:stable-slim (global default)`,
+/// `Dockerfile (repository default, ARG BASE: stacks)`, `gpu.Dockerfile
+/// (repository gpu, replaces)`. A Dockerfile in `repo_root` is named
+/// relative to it; others by `~/…` or in full.
+pub fn describe(chain: &[ImageLayer], repo_root: &Path, home: &Path) -> Vec<String> {
     chain
         .iter()
         .enumerate()
-        .map(|(index, source)| {
-            let (name, stacking) = match source {
+        .map(|(index, image)| {
+            let (name, stacking) = match &image.source {
                 ImageSource::Reference(reference) => (reference.clone(), false),
                 ImageSource::Build(spec) => {
-                    let dockerfile = config_dir.join(&spec.dockerfile);
+                    let dockerfile = repo_root.join(&spec.dockerfile);
                     let stacking = !spec.args.contains_key(BASE_ARG) && stacks(&dockerfile);
-                    (config::tilde(&dockerfile, home), stacking)
+                    let name = match dockerfile.strip_prefix(repo_root) {
+                        Ok(inside) => inside.display().to_string(),
+                        Err(_) => config::tilde(&dockerfile, home),
+                    };
+                    (name, stacking)
                 }
             };
+            let cell = &image.cell;
             match (index, stacking) {
-                (0, false) => name,
-                (0, true) => format!("{name} (ARG BASE: its default)"),
-                (_, false) => format!("{name} (replaces)"),
-                (_, true) => format!("{name} (ARG BASE: stacks)"),
+                (0, false) => format!("{name} ({cell})"),
+                (0, true) => format!("{name} ({cell}, ARG BASE: its default)"),
+                (_, false) => format!("{name} ({cell}, replaces)"),
+                (_, true) => format!("{name} ({cell}, ARG BASE: stacks)"),
             }
         })
         .collect()
@@ -259,6 +266,7 @@ mod tests {
     use docker_wrapper::DockerCommand;
 
     use super::*;
+    use crate::config::{Cell, Config, ConfigFile, Layer};
 
     const DOCKERFILE: &str = "FROM alpine:3\n";
 
@@ -521,36 +529,115 @@ mod tests {
     }
 
     #[test]
-    fn describe__chain__each_image_with_what_it_does() {
+    fn describe__chain__each_image_with_its_cell_and_what_it_does() {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in [("stacking", STACKING), ("replacing", REPLACING)] {
             std::fs::write(dir.path().join(name), text).unwrap();
         }
-        let build = |name: &str| {
-            ImageSource::Build(BuildSpec {
+        let image = |profile: &str, source| ImageLayer {
+            cell: Cell {
+                owner: ConfigFile::Repository,
+                profile: profile.to_owned(),
+            },
+            source,
+        };
+        let build = |profile: &str, name: &str| {
+            let spec = BuildSpec {
                 dockerfile: PathBuf::from(name),
                 context: PathBuf::from("."),
                 args: BTreeMap::new(),
-            })
+            };
+            image(profile, ImageSource::Build(spec))
         };
         let chain = [
-            build("stacking"),
-            ImageSource::Reference("debian".to_owned()),
-            build("stacking"),
-            build("replacing"),
+            build("default", "stacking"),
+            image("a", ImageSource::Reference("debian".to_owned())),
+            build("b", "stacking"),
+            build("c", "replacing"),
         ];
 
-        let lines = describe(&chain, dir.path(), dir.path());
+        let lines = describe(&chain, dir.path(), Path::new("/home/sally"));
 
         assert_eq!(
             lines,
             [
-                "~/stacking (ARG BASE: its default)",
-                "debian (replaces)",
-                "~/stacking (ARG BASE: stacks)",
-                "~/replacing (replaces)",
+                "stacking (repository default, ARG BASE: its default)",
+                "debian (repository a, replaces)",
+                "stacking (repository b, ARG BASE: stacks)",
+                "replacing (repository c, replaces)",
             ]
         );
+    }
+
+    #[test]
+    fn header__two_files_two_profiles__grid_then_images_in_fold_order() {
+        let home = tempfile::tempdir().unwrap();
+        let (global_dir, app) = (
+            home.path().join(".config/viz-shell"),
+            home.path().join("repos/app"),
+        );
+        let files = [
+            (global_dir.join("viz-shell.base.Dockerfile"), REPLACING),
+            (
+                global_dir.join("viz-shell.global.yml"),
+                "image: { dockerfile: viz-shell.base.Dockerfile }\n\
+                 profiles:\n  trusted: { privileges: { sudo: true } }\n",
+            ),
+            (app.join("Dockerfile"), STACKING),
+            (app.join("gpu.Dockerfile"), STACKING),
+            (
+                app.join("viz-shell.yml"),
+                "image: { dockerfile: Dockerfile }\n\
+                 profiles:\n  trusted: { share: { docker: true } }\n\
+                 \x20 gpu: { extends: trusted, image: { dockerfile: gpu.Dockerfile } }\n",
+            ),
+        ];
+        for (path, text) in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let load = |path: &Path| Layer::load(path, home.path(), &app).unwrap();
+        let config = Config::new(Some(load(&files[1].0)), Some(load(&files[4].0)), None).unwrap();
+        let default = [
+            "default: global, repository",
+            "image: ~/.config/viz-shell/viz-shell.base.Dockerfile (global default)",
+            "image: Dockerfile (repository default, ARG BASE: stacks)",
+        ];
+        let cases: [(Option<&str>, &[&str]); 3] = [
+            (None, &default),
+            (
+                Some("trusted"),
+                &[
+                    "default: global, repository",
+                    "trusted: global, repository",
+                    default[1],
+                    default[2],
+                ],
+            ),
+            (
+                Some("gpu"),
+                &[
+                    "default: global, repository",
+                    "trusted: global, repository",
+                    "gpu: repository",
+                    default[1],
+                    default[2],
+                    "image: gpu.Dockerfile (repository gpu, ARG BASE: stacks)",
+                ],
+            ),
+        ];
+        for (profile, expected) in cases {
+            let effective = config.effective(profile).unwrap();
+
+            let images = describe(&effective.images, &app, home.path());
+
+            let lines: Vec<String> = effective
+                .grid_lines()
+                .into_iter()
+                .chain(images.iter().map(|line| format!("image: {line}")))
+                .collect();
+            assert_eq!(lines, expected, "{profile:?}");
+        }
     }
 
     #[test]

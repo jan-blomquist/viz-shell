@@ -16,7 +16,8 @@ pub struct Cli {
     #[arg(short = 'c', long, global = true)]
     pub config_file: Option<PathBuf>,
 
-    /// A profile from vz.yml, applied on top of its root
+    /// A profile from any configuration file, applied on top of the default
+    /// (the top-level keys), after the profiles it extends
     #[arg(long, env = PROFILE_ENV, global = true)]
     pub profile: Option<String>,
 

@@ -36,14 +36,14 @@ profiles:
     extends: trusted
 YAML
 
-expect_output "the repository's root overrides the global root" "repo" \
+expect_output "the repository's default overrides the global default" "repo" \
     run_vz -- sh -c 'echo "$WHO"'
 expect_output "a profile in both files: the global section, then the repo's" "repo-trusted s3cret" \
     run_vz --profile trusted -- sh -c 'echo "$WHO $TRUSTED_SECRET"'
 expect_output "a repository profile extends a global one" "s3cret" \
     run_vz --profile ci -- sh -c 'echo "$TRUSTED_SECRET"'
-expect_contains "vz profiles lists where each is defined" "trusted   global, repo" run_vz profiles
-expect_contains "vz profiles lists what each extends" "ci        repo           trusted" run_vz profiles
+expect_contains "vz profiles lists where each is defined" "trusted   global, repository" run_vz profiles
+expect_contains "vz profiles lists what each extends" "ci        repository           trusted" run_vz profiles
 
 mv "$config_home/viz-shell.global.yml" "$config_home/global.yml"
 startup_logs() { VZ_LOG=viz_shell=info run_vz -- sh -c 'echo "$TRUSTED_SECRET"' 2>&1; }

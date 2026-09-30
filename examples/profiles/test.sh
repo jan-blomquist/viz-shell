@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# A profile changes, removes or adds entries on top of the root.
+# A profile changes, removes or adds entries on top of the default.
 source "$(dirname "$0")/../assert.sh"
 
 mkdir -p "$HOME/repos/other"
 echo hello > "$HOME/repos/other/readme"
 
-expect_output "the root mounts ~/repos" "hello" inside cat "$HOME/repos/other/readme"
+expect_output "the default mounts ~/repos" "hello" inside cat "$HOME/repos/other/readme"
 expect_failure "read-only" inside touch "$HOME/repos/other/new"
 
 expect_success "a profile overrides the mode: writable" with_profile writable touch "$HOME/repos/other/new"

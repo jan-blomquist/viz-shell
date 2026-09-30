@@ -190,14 +190,15 @@ fn scaffold_global(dir: &Path, path: &Path) {
     }
 }
 
-/// Each profile: the files that define it, what it extends and changes;
-/// then the configuration files read.
+/// Each profile, `default` first: the owners that define it, what it
+/// extends and changes; then the configuration files read.
 fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
     let profiles = loaded.config.profiles();
     if profiles.is_empty() {
         println!("No profiles yet: add them under `profiles:` in any file.");
     } else {
-        let rows = profiles.into_iter().map(|profile| {
+        let profiles = std::iter::once(loaded.config.default_profile()).chain(profiles);
+        let rows = profiles.map(|profile| {
             [
                 profile.name,
                 profile.defined_in.join(", "),
@@ -207,7 +208,7 @@ fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
                     .unwrap_or_else(|| "-".to_owned()),
             ]
         });
-        print_table(["PROFILE", "FROM", "EXTENDS", "CHANGES"], rows);
+        print_table(["PROFILE", "OWNERS", "EXTENDS", "CHANGES"], rows);
     }
     println!();
     let rows = loaded.files().into_iter().map(|(file, path)| {
@@ -216,7 +217,7 @@ fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
             config::tilde(path, &loaded.user.home),
         ]
     });
-    print_table(["FROM", "FILE"], rows);
+    print_table(["OWNER", "FILE"], rows);
     Ok(())
 }
 
@@ -263,13 +264,13 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         .config
         .effective(profile)
         .context("in the configuration")?;
-    let header = format!(
-        "{}; layers: {}",
-        loaded.files_line(),
-        config.layers.join(", ")
-    );
+    let layers: Vec<String> = config.layers.iter().map(ToString::to_string).collect();
+    let header = format!("{}; layers: {}", loaded.files_line(), layers.join(", "));
     if cli.show_effective_config {
-        println!("# effective configuration of {header}");
+        println!("# effective configuration of {}", loaded.files_line());
+        for line in config.grid_lines() {
+            println!("# {line}");
+        }
         for line in build::describe(&config.images, &loaded.repo_root, &loaded.user.home) {
             println!("# image: {line}");
         }
@@ -431,7 +432,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
 
     state::create_sources(&state)?;
     mounts::create_points_in_state(&mounts)?;
-    let steps = build::plan(&config.images, &config_dir, &user)?;
+    let steps = build::plan(&config.image_sources(), &config_dir, &user)?;
     prepare_image(&engine, &steps).await?;
     let (top, below) = steps.split_last().expect("an image chain has a top");
     let image = top.tag().to_owned();

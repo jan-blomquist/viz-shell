@@ -1,10 +1,10 @@
-# Profiles: named layers on top of this file's root, chosen with
+# Profiles: named layers on top of the default (the top-level keys), chosen with
 # `vz --profile NAME` or VZ_PROFILE=NAME. An entry with the same path updates
-# the root's in its place; `enabled: false` removes one.
+# the default's in its place; `enabled: false` removes one.
 image: debian:stable-slim
 state_dir: .vz_state
 
-# The root: what plain `vz` runs with.
+# The default: what plain `vz` runs with.
 mounts:
   - ~/repos
 

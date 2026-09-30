@@ -113,6 +113,7 @@ profiles:
 
 - [Use](#use)
 - [Whose file is it](#whose-file-is-it)
+- [How configuration stacks](#how-configuration-stacks)
 - [Sessions](#sessions)
 - [Images](#images)
 - [Your user in the image](#your-user-in-the-image)
@@ -136,7 +137,7 @@ profiles:
 vz                  # a shell: `shell`, else bash, else sh
 vz -- cargo test    # one command instead
 vz -c other.yml     # another configuration: -c, --config-file
-vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
+vz --profile ci     # the default plus the profile ci; or VZ_PROFILE=ci
 vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
 vz profiles         # the profiles of the global, repository and local configuration
 vz new api          # a container named api; see Sessions
@@ -218,6 +219,36 @@ The portability test for the repository file: no host path outside the repositor
 which lives inside it. A random user cloning the repository and running `vz` gets the environment;
 what they bring is theirs.
 
+## How configuration stacks
+
+Two axes. **Owner**: whose file, `global`, `repository`, `local`; always applied, in that order,
+never declared. **Profile**: what was asked for; `default`, a file's top-level keys, always applies,
+and `--profile gpu` adds `gpu` and what it `extends`, base-most first.
+
+```
+              global   repository   local
+default         ●         ●          ●     always
+trusted         ●         ●          ·     --profile trusted, or extended by gpu
+gpu             ·         ●          ●     --profile gpu
+```
+
+- One fold over the grid, profiles outer, owners inner: `default` (global, repository, local), then
+  each profile of the chain the same way. A cell with no file, or no section in it, is skipped.
+- One merge rule: later wins; keyed lists merge by key. More specific wins; among versions of the
+  same thing, the later owner wins.
+- Owners are ownership, not inheritance: the repository file cannot opt out of your files, which keeps
+  it portable. `extends` is explicit: a choice among profiles.
+- `image:` follows the same order, each one replacing the one before, or stacking on it when its
+  Dockerfile declares `ARG BASE` ([Images](#images)).
+- The image belongs to the repository; the session belongs to the user. No owner can change a
+  repository's image unless its Dockerfile declares `ARG BASE`, and no build arg reaches a Dockerfile
+  that does not declare it: a Dockerfile with a pinned `FROM` and no `ARG BASE` builds the same for
+  everyone. Mounts, env, state, hooks and the shell are the session: yours, on your machine.
+- The global file is a convenience, not a requirement: a repository file alone runs `vz`.
+- `--show-effective-config` prints the grid as applied and each `image:` with its cell;
+  `vz profiles` lists which owners define each profile, `default` first. `default` is no name for a
+  profile.
+
 ## Sessions
 
 Every container is named `vz-<index>-<repository>`, its hostname too, so your prompt says which one
@@ -270,9 +301,9 @@ image:                        # build; paths relative to the vz.yml's folder
   checkout, stacked on the base (below); alone, on pinned Debian, with what the base adds.
 
 **Stacking.** A Dockerfile that declares `ARG BASE` (`ARG BASE=<default>`, then `FROM ${BASE}`, as
-below) is built on the image the earlier layers resolved to: vz pulls or builds that one first, then
-passes `--build-arg BASE=<its tag>`. Layers apply in order, global root, repository root, local root,
-then the profile's `extends` chain, so a later layer's Dockerfile lands on top. The base's tag joins
+below) is built on the image the earlier cells resolved to: vz pulls or builds that one first, then
+passes `--build-arg BASE=<its tag>`. Images follow the [fold order](#how-configuration-stacks), so a
+later cell's Dockerfile lands on top. The base's tag joins
 the hash: a new base rebuilds what stacks on it. With no earlier image, the default applies. A
 Dockerfile without `ARG BASE`, `BASE` set in `args`, or an image reference replaces.
 `--show-effective-config` lists the chain, each image marked `stacks` or `replaces`; the banner shows
@@ -527,8 +558,8 @@ To seed a config file once, a `state` file with `init:` needs no hook.
 
 ## Profiles
 
-Named layers on top of the root of `vz.yml`, keyed by name, each with the same keys. Choose one with
-`vz --profile NAME` or `VZ_PROFILE=NAME`; plain `vz` uses the root alone.
+Named layers on top of the `default` (a file's top-level keys), keyed by name, each with the same
+keys. Choose one with `vz --profile NAME` or `VZ_PROFILE=NAME`; plain `vz` uses the default alone.
 
 ```yaml
 mounts:
@@ -544,7 +575,7 @@ profiles:
     state: [~/scratch]                          # and adds its own
 ```
 
-Every collection is a list, merged the same way: root, then the `extends` chain, then the profile.
+Order and merge rule: [How configuration stacks](#how-configuration-stacks). Every collection is a list:
 
 - An entry is a bare path or name for the common case, or expanded for anything else.
 - An entry with the same key (a path; a name for passthrough; the command for hooks) updates the
@@ -555,7 +586,7 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
   stacks instead: see [Images](#images).
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
 - Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
-- `vz --profile NAME --show-effective-config` prints the result: every layer applied, shorthands spelled out.
+- `vz --profile NAME --show-effective-config` prints the result: the cells applied, shorthands spelled out.
 
 ## Global configuration
 
@@ -570,22 +601,14 @@ host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
   A `global.yml`, the former name, is still read when none of them exists.
 
 - A repository without a configuration runs from the global one alone.
-- Layers, later wins: global root, repository root, [local](#local-configuration) root, then for the
-  chosen profile and each it extends (first extended first): its global, repository and local sections.
-
-| `vz` | layers |
-|---|---|
-| `vz` | global root → repo root → local root |
-| `vz --profile trusted` | … → global `trusted` → repo `trusted` → local `trusted` |
-| `vz --profile ci`, repo `ci: { extends: trusted }` | … → global `trusted` → repo `trusted` → repo `ci` |
-
+- Order and merge rule: [How configuration stacks](#how-configuration-stacks).
 - A profile is a mode: each file says what it adds in it. A repository's `trusted:` adds to the global
-  `trusted`, and any profile can `extends: trusted`. A chosen profile beats both roots.
+  `trusted`, and any profile can `extends: trusted`.
 - Relative paths belong to their file: `trusted.env` in `viz-shell.global.yml` is
   `~/.config/viz-shell/trusted.env`.
   Every path is made absolute when read, so a repository removes a global entry however it writes it.
-- `vz profiles` lists each profile and the files that define it; `--show-effective-config` and
-  `--show-env` name the files read and the layers applied.
+- `vz profiles` lists each profile and the owners that define it; `--show-effective-config` and
+  `--show-env` name the files read and the cells applied.
 
 Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, which can name any host
 file or share the docker daemon. Review a repository's configuration as you would its code. What
@@ -614,7 +637,7 @@ env:
 - It may define its own profiles, selected with `--profile` like any other, and its own `image:`:
   a personal Dockerfile with `ARG BASE` stacks on the repository's image.
 - A local file alone is no configuration: it needs a repository or a global one.
-- `--show-effective-config` names it and lists its layers: `local root`, `local <profile>`.
+- `--show-effective-config` names it and shows its cells: `default: …, local`, `<profile>: …, local`.
 
 ## Examples
 

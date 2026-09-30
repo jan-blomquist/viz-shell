@@ -39,6 +39,10 @@ pub const LEGACY_GLOBAL_CONFIG_FILE: &str = "global.yml";
 /// a first run; the default global configuration builds it.
 pub const BASE_DOCKERFILE: &str = "viz-shell.base.Dockerfile";
 
+/// The profile every run applies: each file's top-level keys. Not a name a
+/// profile may take.
+pub const DEFAULT_PROFILE: &str = "default";
+
 /// Selects a profile when `--profile` is not given; CI sets it once.
 pub const PROFILE_ENV: &str = "VZ_PROFILE";
 

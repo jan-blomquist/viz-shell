@@ -1,10 +1,11 @@
-//! Configuration: the global file, the repository's and your local overlay
-//! of it, each a root [`Layer`] with named profiles of the same shape.
-//! [`Config::effective`] applies them in order and resolves the result into
-//! the [`EffectiveConfig`] vz runs with: global root, repo root, local root,
-//! then for each profile of the chosen one's `extends` chain, its global,
-//! repo and local sections. A profile is a mode: each file says what it adds
-//! in it.
+//! Configuration on two axes. Owner: the global file (you, everywhere), the
+//! repository's, and your local overlay of it (you, here); always applied, in
+//! that order. Profile: `default`, a file's top-level keys, always applies;
+//! a chosen profile adds itself and those it `extends`, base-most first. Each
+//! file is a [`Layer`] holding its default and its named profiles of the same
+//! shape. [`Config::effective`] folds the grid, profiles outer, owners inner,
+//! into the [`EffectiveConfig`] vz runs with. A profile is a mode: each file
+//! says what it adds in it.
 //!
 //! Collections are lists of entries, each keyed by its path or name: a bare
 //! entry for the common case, the expanded form for anything else, and
@@ -22,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::constants::{
-    DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_TAG, GLOBAL_CONFIG_FILES, HOME_PREFIX,
-    LEGACY_GLOBAL_CONFIG_FILE,
+    DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_PROFILE, DEFAULT_TAG, GLOBAL_CONFIG_FILES,
+    HOME_PREFIX, LEGACY_GLOBAL_CONFIG_FILE,
 };
 
 /// The configuration files in effect, each optional, checked: every
@@ -44,29 +45,59 @@ pub enum ConfigFile {
 }
 
 impl ConfigFile {
-    /// As the layers' labels name it: `global`, `repo`, `local`.
+    /// Its owner, as labels name it: `global`, `repository`, `local`.
     pub fn origin(self) -> &'static str {
         match self {
             ConfigFile::Global => "global",
-            ConfigFile::Repository => "repo",
+            ConfigFile::Repository => "repository",
             ConfigFile::Local => "local",
         }
     }
+}
+
+/// One cell of the grid the effective configuration folds: an owner's
+/// section of a profile, `default` for a file's top-level keys.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cell {
+    pub owner: ConfigFile,
+    pub profile: String,
+}
+
+impl std::fmt::Display for Cell {
+    /// `global default`, `repository trusted`, …
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.owner.origin(), self.profile)
+    }
+}
+
+/// Tests compare cells with their labels.
+#[cfg(test)]
+impl PartialEq<&str> for Cell {
+    fn eq(&self, label: &&str) -> bool {
+        label.split_once(' ') == Some((self.owner.origin(), self.profile.as_str()))
+    }
+}
+
+/// An `image:` of the chain, with the cell that set it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageLayer {
+    pub cell: Cell,
+    pub source: ImageSource,
 }
 
 /// A profile as `vz profiles` shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileInfo {
     pub name: String,
-    /// `global`, `repo`, `local`: those that define it, in that order.
+    /// `global`, `repository`, `local`: the owners that define it, in that order.
     pub defined_in: Vec<&'static str>,
     pub extends: Option<String>,
     /// What its sections change, in a few words each: `sudo`, `2 mounts`, …
     pub changes: Vec<String>,
 }
 
-/// One layer of configuration: the root of `vz.yml`, or a profile. Every
-/// field is optional.
+/// One layer of configuration: a file, whose top-level keys are its
+/// `default`, or one of its profiles. Every field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
@@ -612,11 +643,12 @@ impl Keyed for MountItem {
 /// shorthands spelled out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveConfig {
-    /// The layers applied, in order: `global root`, `repo trusted`, …
-    pub layers: Vec<String>,
-    /// Every `image:` of the layers applied, bottom first; one set again
+    /// The cells applied, in fold order: `global default`, `repository
+    /// trusted`, …
+    pub layers: Vec<Cell>,
+    /// Every `image:` of the cells applied, bottom first; one set again
     /// right above itself counts once. Never empty.
-    pub images: Vec<ImageSource>,
+    pub images: Vec<ImageLayer>,
     pub state_dir: Option<String>,
     pub banner: bool,
     pub shell: Option<String>,
@@ -705,23 +737,28 @@ impl Config {
         Ok(config)
     }
 
-    /// Global root, repo root, local root, then for each profile of the
-    /// chosen one's chain, from its start: its global, repo and local
-    /// sections. Later layers win per field and per key; every `image:` is
-    /// kept, in order, for the plan to stack or replace.
+    /// One fold over the grid, profiles outer, owners inner: `default`
+    /// (global, repository, local), then each profile of the chosen one's
+    /// chain, from its start, the same way. Later cells win per field and
+    /// per key; every `image:` is kept, in order, for the plan to stack or
+    /// replace.
     pub fn effective(&self, profile: Option<&str>) -> anyhow::Result<EffectiveConfig> {
         let chain = match profile {
             Some(name) => self.chain(name)?,
             None => Vec::new(),
         };
-        let mut layers: Vec<(String, ConfigFile, &Layer)> = self
+        let cell = |owner, profile: &str| Cell {
+            owner,
+            profile: profile.to_owned(),
+        };
+        let mut layers: Vec<(Cell, ConfigFile, &Layer)> = self
             .files()
-            .map(|(file, root)| (format!("{} root", file.origin()), file, root))
+            .map(|(file, layer)| (cell(file, DEFAULT_PROFILE), file, layer))
             .collect();
         for name in &chain {
             for (file, layer) in self.files() {
                 if let Some(section) = layer.profiles.get(name) {
-                    layers.push((format!("{} {name}", file.origin()), file, section));
+                    layers.push((cell(file, name), file, section));
                 }
             }
         }
@@ -736,17 +773,37 @@ impl Config {
                 .map(|(_, file, _)| *file)
                 .expect("an effective mount comes from a layer")
         };
-        let mut images: Vec<ImageSource> = layers
+        let mut images: Vec<ImageLayer> = layers
             .iter()
-            .filter_map(|(_, _, layer)| layer.image.clone())
+            .filter_map(|(cell, _, layer)| {
+                Some(ImageLayer {
+                    cell: cell.clone(),
+                    source: layer.image.clone()?,
+                })
+            })
             .collect();
-        images.dedup();
+        images.dedup_by(|above, below| above.source == below.source);
         let mut effective = EffectiveConfig::resolve(merged, images, mount_file)?;
         effective.layers = layers.into_iter().map(|(label, _, _)| label).collect();
         Ok(effective)
     }
 
-    /// Every profile, with the files that define it and what it extends.
+    /// `default`: the owners whose files are read, and what their top-level
+    /// keys set.
+    pub fn default_profile(&self) -> ProfileInfo {
+        ProfileInfo {
+            name: DEFAULT_PROFILE.to_owned(),
+            defined_in: self.files().map(|(file, _)| file.origin()).collect(),
+            extends: None,
+            changes: self
+                .files()
+                .fold(Layer::default(), |base, (_, layer)| base.merge(layer))
+                .changes(),
+        }
+    }
+
+    /// Every named profile, with the owners that define it and what it
+    /// extends.
     pub fn profiles(&self) -> Vec<ProfileInfo> {
         self.profile_names()
             .into_iter()
@@ -819,15 +876,21 @@ impl Config {
 
 impl Layer {
     /// One configuration file, checked on its own: `extends` only in
-    /// profiles, profiles not nested, paths and names well formed.
+    /// profiles, profiles not nested, none named `default`, paths and names
+    /// well formed.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
-        let root: Layer = serde_saphyr::from_str(text).context("invalid configuration")?;
+        let file: Layer = serde_saphyr::from_str(text).context("invalid configuration")?;
         ensure!(
-            root.extends.is_none(),
-            "`extends` belongs in a profile; the root is what every profile starts from"
+            file.extends.is_none(),
+            "`extends` belongs in a profile; the top-level keys, the `{DEFAULT_PROFILE}` \
+             profile, are what every profile starts from"
         );
-        root.check_entries()?;
-        for (name, profile) in &root.profiles {
+        ensure!(
+            !file.profiles.contains_key(DEFAULT_PROFILE),
+            "profile `{DEFAULT_PROFILE}` is the top-level keys; name the profile otherwise"
+        );
+        file.check_entries()?;
+        for (name, profile) in &file.profiles {
             ensure!(
                 profile.profiles.is_empty(),
                 "profile `{name}` holds `profiles`; profiles do not nest"
@@ -836,7 +899,7 @@ impl Layer {
                 .check_entries()
                 .with_context(|| format!("in profile `{name}`"))?;
         }
-        Ok(root)
+        Ok(file)
     }
 
     /// Reads, checks, and makes every host path absolute: relative to the
@@ -1042,10 +1105,10 @@ pub fn is_env_name(name: &str) -> bool {
 
 impl EffectiveConfig {
     /// `mount_file` names the file that set a mount last, by its key.
-    /// `images`: every `image:` of the layers, bottom first.
+    /// `images`: every `image:` of the cells, bottom first.
     fn resolve(
         layer: Layer,
-        images: Vec<ImageSource>,
+        images: Vec<ImageLayer>,
         mount_file: impl Fn(&str) -> ConfigFile,
     ) -> anyhow::Result<Self> {
         ensure!(
@@ -1193,11 +1256,33 @@ impl EffectiveHooks {
 }
 
 impl EffectiveConfig {
-    /// The top of the image chain: the image of the last layer that set one.
+    /// The top of the image chain: the image of the last cell that set one.
     pub fn image(&self) -> &ImageSource {
-        self.images
+        &self
+            .images
             .last()
             .expect("an effective configuration has an image")
+            .source
+    }
+
+    /// The image chain, bottom first, without the cells.
+    pub fn image_sources(&self) -> Vec<ImageSource> {
+        self.images
+            .iter()
+            .map(|image| image.source.clone())
+            .collect()
+    }
+
+    /// The grid as applied, one line per profile in fold order, with the
+    /// owners whose files have it: `default: global, repository, local`.
+    pub fn grid_lines(&self) -> Vec<String> {
+        self.layers
+            .chunk_by(|a, b| a.profile == b.profile)
+            .map(|cells| {
+                let owners: Vec<&str> = cells.iter().map(|cell| cell.owner.origin()).collect();
+                format!("{}: {}", cells[0].profile, owners.join(", "))
+            })
+            .collect()
     }
 
     /// As a `vz.yml` without profiles: every entry in its shortest form that
@@ -1499,7 +1584,7 @@ mounts:
     }
 
     #[test]
-    fn effective__no_profile__is_the_root() {
+    fn effective__no_profile__is_the_default() {
         let config = effective(BASE, None);
 
         let expected = vec![
@@ -1521,26 +1606,27 @@ mounts:
     }
 
     #[test]
-    fn effective__profile_entry_disabled__removes_the_root_entry() {
+    fn effective__profile_entry_disabled__removes_the_default_s_entry() {
         let config = effective(BASE, Some("bare"));
 
         assert_eq!((config.mounts, config.state), (vec![], vec![]));
     }
 
     #[test]
-    fn effective__extends_chain__applies_root_then_extended_then_profile() {
+    fn effective__extends_chain__applies_default_then_extended_then_profile() {
         let config = effective(BASE, Some("bare-alpine"));
 
+        let cell = |profile: &str| Cell {
+            owner: ConfigFile::Repository,
+            profile: profile.to_owned(),
+        };
+        let image = |profile: &str, reference: &str| ImageLayer {
+            cell: cell(profile),
+            source: ImageSource::Reference(reference.to_owned()),
+        };
         let expected = EffectiveConfig {
-            layers: vec![
-                "repo root".to_owned(),
-                "repo bare".to_owned(),
-                "repo bare-alpine".to_owned(),
-            ],
-            images: vec![
-                ImageSource::Reference("debian".to_owned()),
-                ImageSource::Reference("alpine".to_owned()),
-            ],
+            layers: vec![cell("default"), cell("bare"), cell("bare-alpine")],
+            images: vec![image("default", "debian"), image("bare-alpine", "alpine")],
             state_dir: None,
             banner: false,
             shell: None,
@@ -2590,7 +2676,7 @@ profiles:
     fn effective__no_profile__global_root_then_repo_root() {
         let config = both(GLOBAL, REPO).effective(None).unwrap();
 
-        assert_eq!(config.layers, ["global root", "repo root"]);
+        assert_eq!(config.layers, ["global default", "repository default"]);
         assert_eq!(*config.image(), ImageSource::Reference("debian".to_owned()));
         assert_eq!(who(&config), "repo");
     }
@@ -2601,16 +2687,21 @@ profiles:
 
         assert_eq!(
             config.layers,
-            ["global root", "repo root", "global trusted", "repo trusted"]
+            [
+                "global default",
+                "repository default",
+                "global trusted",
+                "repository trusted"
+            ]
         );
         assert_eq!(who(&config), "repo-trusted");
     }
 
     #[test]
-    fn effective__chosen_profile__beats_both_roots() {
+    fn effective__chosen_profile__beats_both_defaults() {
         let config = both(GLOBAL, REPO).effective(Some("trusted")).unwrap();
 
-        // The repo root turns docker off; the global trusted profile turns it on.
+        // The repository default turns docker off; the global trusted profile turns it on.
         assert!(config.share.docker);
     }
 
@@ -2629,11 +2720,11 @@ profiles:
         assert_eq!(
             config.layers,
             [
-                "global root",
-                "repo root",
+                "global default",
+                "repository default",
                 "global trusted",
-                "repo trusted",
-                "repo ci"
+                "repository trusted",
+                "repository ci"
             ]
         );
         assert!(config.share.docker);
@@ -2698,15 +2789,15 @@ profiles:
         let expected = vec![
             ProfileInfo {
                 name: "ci".to_owned(),
-                defined_in: vec!["repo"],
+                defined_in: vec!["repository"],
                 extends: Some("trusted".to_owned()),
                 changes: vec![],
             },
             ProfileInfo {
                 name: "trusted".to_owned(),
-                defined_in: vec!["global", "repo"],
+                defined_in: vec!["global", "repository"],
                 extends: None,
-                // The global section's docker and file, the repo section's default.
+                // The global section's docker and file, the repository section's default.
                 changes: vec![
                     "docker".to_owned(),
                     "1 env default".to_owned(),
@@ -2721,6 +2812,51 @@ profiles:
             },
         ];
         assert_eq!(profiles, expected);
+    }
+
+    #[test]
+    fn default_profile__owners_of_the_files_read() {
+        let cases = [
+            (repo("image: debian\n"), vec!["repository"]),
+            (both(GLOBAL, REPO), vec!["global", "repository"]),
+            (
+                all_three(GLOBAL_OF_THREE, REPO_OF_THREE, LOCAL_OF_THREE),
+                vec!["global", "repository", "local"],
+            ),
+        ];
+        for (config, expected) in cases {
+            let default = config.default_profile();
+
+            assert_eq!(default.name, "default");
+            assert_eq!(default.defined_in, expected);
+            assert_eq!(default.extends, None);
+        }
+    }
+
+    #[test]
+    fn parse__profile_named_default__is_refused() {
+        let message = error("image: debian\nprofiles:\n  default:\n    shell: sh\n");
+
+        assert!(
+            message.contains("profile `default` is the top-level keys"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn grid_lines__three_owners_two_profiles__one_line_per_profile_in_fold_order() {
+        let config = all_three(GLOBAL_OF_THREE, REPO_OF_THREE, LOCAL_OF_THREE);
+
+        let lines = config.effective(Some("extra")).unwrap().grid_lines();
+
+        assert_eq!(
+            lines,
+            [
+                "default: global, repository, local",
+                "base: global",
+                "extra: repository, local",
+            ]
+        );
     }
 
     const GLOBAL_OF_THREE: &str = "\
@@ -2768,15 +2904,15 @@ profiles:
         let config = all_three(GLOBAL_OF_THREE, REPO_OF_THREE, LOCAL_OF_THREE);
         let shared = ("/home/sally/shared", MountMode::Ro, ConfigFile::Local);
         let extra = ("/home/sally/extra", MountMode::Ro, ConfigFile::Repository);
-        let roots = ["global root", "repo root", "local root"];
+        let defaults = ["global default", "repository default", "local default"];
         let cases: [(Option<&str>, &[&str], &str, &[_]); 3] = [
             (None, &[], "local", &[shared]),
-            // The chosen profile beats every root.
+            // The chosen profile beats every default.
             (Some("base"), &["global base"], "global-base", &[shared]),
             // Local's `extra` merges over the repo's, which extends the global `base`.
             (
                 Some("extra"),
-                &["global base", "repo extra", "local extra"],
+                &["global base", "repository extra", "local extra"],
                 "local-extra",
                 &[shared, extra],
             ),
@@ -2784,7 +2920,7 @@ profiles:
         for (profile, sections, expected_who, expected_mounts) in cases {
             let effective = config.effective(profile).unwrap();
 
-            let layers: Vec<&str> = roots.iter().chain(sections).copied().collect();
+            let layers: Vec<&str> = defaults.iter().chain(sections).copied().collect();
             assert_eq!(effective.layers, layers, "{profile:?}");
             assert_eq!(effective.shell.as_deref(), Some("fish"), "{profile:?}");
             assert_eq!(who(&effective), expected_who, "{profile:?}");
@@ -2848,7 +2984,7 @@ profiles:
         for (profile, expected) in cases {
             let effective = config.effective(profile).unwrap();
 
-            assert_eq!(effective.images, expected, "{profile:?}");
+            assert_eq!(effective.image_sources(), expected, "{profile:?}");
             assert_eq!(effective.image(), expected.last().unwrap(), "{profile:?}");
         }
     }
@@ -2859,7 +2995,10 @@ profiles:
 
         let config = effective(text, Some("p"));
 
-        assert_eq!(config.images, [ImageSource::Reference("debian".to_owned())]);
+        assert_eq!(
+            config.image_sources(),
+            [ImageSource::Reference("debian".to_owned())]
+        );
     }
 
     #[test]
@@ -2885,7 +3024,10 @@ profiles:
             .collect();
         assert_eq!(
             defined_in,
-            [("base", &["global"][..]), ("extra", &["repo", "local"][..])]
+            [
+                ("base", &["global"][..]),
+                ("extra", &["repository", "local"][..])
+            ]
         );
     }
 
@@ -2900,11 +3042,11 @@ profiles:
         assert_eq!(
             layers,
             [
-                "global root",
-                "repo root",
-                "local root",
+                "global default",
+                "repository default",
+                "local default",
                 "global other",
-                "repo extra",
+                "repository extra",
                 "local extra"
             ]
         );
