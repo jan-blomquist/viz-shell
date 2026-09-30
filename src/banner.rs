@@ -1,11 +1,11 @@
 //! `banner: true`: the viz-shell banner above an interactive shell, in the
-//! manner of fastfetch: the art on the left, what the shell is on the right.
+//! manner of fastfetch: the art on top, what the shell is below it.
 
 use std::path::Path;
 
 use anstyle::{AnsiColor, Style};
 
-use crate::config::tilde;
+use crate::config::{ConfigFile, tilde};
 use crate::mounts::HostMount;
 
 /// `figlet viz-shell`.
@@ -20,9 +20,6 @@ const ART: [&str; 5] = [
 /// This build: the version in Cargo.toml.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Between the art and the facts.
-const GAP: &str = "   ";
-
 const ART_STYLE: Style = AnsiColor::Cyan.on_default();
 const KEY_STYLE: Style = AnsiColor::Cyan.on_default().bold();
 
@@ -31,8 +28,10 @@ pub struct Session<'a> {
     pub user: &'a str,
     /// The container's name, which is its hostname too.
     pub container: &'a str,
-    /// `new, removed on exit`, `attached`, …
-    pub state: &'a str,
+    /// Joining a container that already exists, rather than a new one.
+    pub attached: bool,
+    /// The container outlives the shell.
+    pub persistent: bool,
     pub home: &'a Path,
     pub repo_root: &'a Path,
     pub branch: Option<&'a str>,
@@ -70,14 +69,30 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         .filter_map(|file| file.file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .collect();
-    let mounts: Vec<String> = session
-        .mounts
-        .iter()
-        .map(|mount| {
-            let mode = if mount.read_only { "ro" } else { "rw" };
-            format!("{} ({mode})", tilde(&mount.target, home))
+    // The files are global first: one file alone is both first and last.
+    let file_name = |file: ConfigFile| match file {
+        ConfigFile::Global => file_names.first(),
+        ConfigFile::Repository => file_names.last(),
+    };
+    let per_file: Vec<(usize, &str)> = [ConfigFile::Global, ConfigFile::Repository]
+        .into_iter()
+        .filter_map(|file| {
+            let count = session.mounts.iter().filter(|m| m.file == file).count();
+            let name = file_name(file)?;
+            (count > 0).then_some((count, name.as_str()))
         })
         .collect();
+    let mounts = match per_file.as_slice() {
+        [] => "none".to_owned(),
+        [(count, name)] => format!("{count} ({name})"),
+        _ => {
+            let counts: Vec<String> = per_file
+                .iter()
+                .map(|(count, name)| format!("{count} {name}"))
+                .collect();
+            format!("{} ({})", session.mounts.len(), counts.join(", "))
+        }
+    };
     let state = match session.state_paths {
         0 => "none".to_owned(),
         1 => format!("1 path in {}", tilde(session.state_dir, home)),
@@ -88,9 +103,15 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         1 => "1 variable".to_owned(),
         vars => format!("{vars} variables"),
     };
+    let how = if session.attached { "attached" } else { "new" };
+    let lifetime = if session.persistent {
+        "persistent"
+    } else {
+        "ephemeral"
+    };
     let mut facts = vec![
         ("Version", VERSION.to_owned()),
-        ("Session", session.state.to_owned()),
+        ("Session", format!("{how}, {lifetime}")),
         ("Repo", tilde(session.repo_root, home)),
     ];
     if let Some(branch) = session.branch {
@@ -100,64 +121,56 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         ("Config", or_none(file_names.join(", "))),
         ("Profile", session.profile.unwrap_or("none").to_owned()),
         ("Image", session.image.to_owned()),
-        ("Shell", session.shell.unwrap_or("bash, else sh").to_owned()),
+        (
+            "Shell",
+            session.shell.unwrap_or("bash (else sh)").to_owned(),
+        ),
         (
             "Sudo",
             match session.sudo {
                 true => "yes".to_owned(),
-                false => "no, the secure floor".to_owned(),
+                false => "no".to_owned(),
             },
         ),
         (
             "Docker",
             session
                 .docker
-                .map_or("no".to_owned(), |socket| socket.display().to_string()),
+                .map_or("none".to_owned(), |socket| socket.display().to_string()),
         ),
         (
             "Network",
             match session.host_network {
-                true => "the host's".to_owned(),
-                false => "docker's own".to_owned(),
+                true => "host".to_owned(),
+                false => "bridge".to_owned(),
             },
         ),
-        ("Mounts", or_none(mounts.join(", "))),
+        ("Mounts", mounts),
         ("State", state),
         ("Env", env),
     ]);
     facts
 }
 
-/// The art, and beside it the title, a rule, and the facts; styled. Print it
-/// through `anstream`, which drops the styles where they don't belong: off a
-/// terminal, or with `NO_COLOR`.
+/// The art, a blank line, then the title, a rule, and the facts; styled.
+/// Print it through `anstream`, which drops the styles where they don't
+/// belong: off a terminal, or with `NO_COLOR`.
 pub fn render(title: &str, facts: &[(&str, String)]) -> String {
     let paint = |style: &Style, text: &str| format!("{style}{text}{style:#}");
-    let art_width = ART
+    let art = ART.iter().map(|line| paint(&ART_STYLE, line));
+    let facts = facts
         .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
-    let right: Vec<String> = [paint(&KEY_STYLE, title), "-".repeat(title.chars().count())]
-        .into_iter()
-        .chain(
-            facts
-                .iter()
-                .map(|(key, value)| format!("{}: {value}", paint(&KEY_STYLE, key))),
-        )
+        .map(|(key, value)| format!("{}: {value}", paint(&KEY_STYLE, key)));
+    let lines: Vec<String> = art
+        .chain([
+            String::new(),
+            paint(&KEY_STYLE, title),
+            "-".repeat(title.chars().count()),
+        ])
+        .chain(facts)
         .collect();
-    let mut banner = String::new();
-    for row in 0..ART.len().max(right.len()) {
-        let left = format!("{:art_width$}", ART.get(row).unwrap_or(&""));
-        let line = match right.get(row) {
-            Some(fact) => format!("{}{GAP}{fact}", paint(&ART_STYLE, &left)),
-            None => paint(&ART_STYLE, left.trim_end()),
-        };
-        banner.push_str(line.trim_end());
-        banner.push('\n');
-    }
-    banner.push('\n');
-    banner
+    // A blank line between the banner and the prompt.
+    format!("{}\n\n", lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -171,7 +184,8 @@ mod tests {
         Session {
             user: "sally",
             container: "vz-0-app",
-            state: "new, removed on exit",
+            attached: false,
+            persistent: false,
             home: Path::new("/home/sally"),
             repo_root: Path::new("/home/sally/repos/app"),
             branch: Some("main"),
@@ -189,33 +203,37 @@ mod tests {
         }
     }
 
+    fn mount(target: &str, file: ConfigFile) -> HostMount {
+        HostMount {
+            source: PathBuf::from(target),
+            target: PathBuf::from(target),
+            read_only: false,
+            point_in_state: None,
+            file,
+        }
+    }
+
+    fn both_files() -> [&'static Path; 2] {
+        [
+            Path::new("/home/sally/.config/viz-shell/global.yml"),
+            Path::new("/home/sally/repos/app/viz-shell.yml"),
+        ]
+    }
+
     #[test]
     fn facts__session__one_line_each_in_order() {
         let mounts = [
-            HostMount {
-                source: PathBuf::from("/home/sally/repos"),
-                target: PathBuf::from("/home/sally/repos"),
-                read_only: true,
-                point_in_state: None,
-            },
-            // Shown where it lands.
-            HostMount {
-                source: PathBuf::from("/home/sally/hosts"),
-                target: PathBuf::from("/etc/hosts"),
-                read_only: false,
-                point_in_state: None,
-            },
+            mount("/home/sally/repos", ConfigFile::Global),
+            mount("/home/sally/.ssh", ConfigFile::Repository),
+            mount("/etc/hosts", ConfigFile::Repository),
         ];
-        let files = [
-            Path::new("/home/sally/.config/viz-shell/global.yml"),
-            Path::new("/home/sally/repos/app/viz-shell.yml"),
-        ];
+        let files = both_files();
 
         let facts = facts(&session(&mounts, &files));
 
         let expected = [
             ("Version", VERSION),
-            ("Session", "new, removed on exit"),
+            ("Session", "new, ephemeral"),
             ("Repo", "~/repos/app"),
             ("Branch", "main"),
             ("Config", "global.yml, viz-shell.yml"),
@@ -224,8 +242,8 @@ mod tests {
             ("Shell", "fish"),
             ("Sudo", "yes"),
             ("Docker", "/run/user/1000/docker.sock"),
-            ("Network", "docker's own"),
-            ("Mounts", "~/repos (ro), /etc/hosts (rw)"),
+            ("Network", "bridge"),
+            ("Mounts", "3 (1 global.yml, 2 viz-shell.yml)"),
             ("State", "2 paths in ~/repos/app/.vz_state"),
             ("Env", "1 variable"),
         ];
@@ -258,9 +276,9 @@ mod tests {
         let expected = [
             ("Config", "none"),
             ("Profile", "none"),
-            ("Shell", "bash, else sh"),
-            ("Sudo", "no, the secure floor"),
-            ("Docker", "no"),
+            ("Shell", "bash (else sh)"),
+            ("Sudo", "no"),
+            ("Docker", "none"),
             ("Mounts", "none"),
             ("State", "none"),
             ("Env", "none"),
@@ -271,22 +289,74 @@ mod tests {
     }
 
     #[test]
+    fn facts__session_kinds__new_or_attached_then_its_lifetime() {
+        let cases = [
+            (false, false, "new, ephemeral"),
+            (false, true, "new, persistent"),
+            (true, false, "attached, ephemeral"),
+            (true, true, "attached, persistent"),
+        ];
+        for (attached, persistent, expected) in cases {
+            let session = Session {
+                attached,
+                persistent,
+                ..session(&[], &[])
+            };
+
+            let facts = facts(&session);
+
+            let (_, value) = facts.iter().find(|(key, _)| *key == "Session").unwrap();
+            assert_eq!(
+                value, expected,
+                "attached {attached}, persistent {persistent}"
+            );
+        }
+    }
+
+    #[test]
+    fn facts__host_network__host() {
+        let session = Session {
+            host_network: true,
+            ..session(&[], &[])
+        };
+
+        let facts = facts(&session);
+
+        let (_, value) = facts.iter().find(|(key, _)| *key == "Network").unwrap();
+        assert_eq!(value, "host");
+    }
+
+    #[test]
+    fn facts__mounts_from_one_file__count_and_that_file() {
+        let mounts = [
+            mount("/home/sally/repos", ConfigFile::Repository),
+            mount("/etc/hosts", ConfigFile::Repository),
+        ];
+        let files = both_files();
+
+        let facts = facts(&session(&mounts, &files));
+
+        let (_, value) = facts.iter().find(|(key, _)| *key == "Mounts").unwrap();
+        assert_eq!(value, "2 (viz-shell.yml)");
+    }
+
+    #[test]
     fn title__session__user_at_the_container() {
         assert_eq!(title(&session(&[], &[])), "sally@vz-0-app");
     }
 
     #[test]
-    fn render__facts__beside_the_art_title_first() {
+    fn render__facts__below_the_art_title_first() {
         let facts = [("Repo", "~/repos/app".to_owned())];
 
         let banner = anstream::adapter::strip_str(&render("sally@app", &facts)).to_string();
 
         let lines: Vec<&str> = banner.lines().collect();
-        let column = ART.iter().map(|line| line.len()).max().unwrap() + GAP.len();
-        assert_eq!(&lines[0][column..], "sally@app");
-        assert_eq!(&lines[1][column..], "---------");
-        assert_eq!(&lines[2][column..], "Repo: ~/repos/app");
-        assert_eq!(lines[3], ART[3].trim_end());
+        assert_eq!(lines[..ART.len()], ART);
+        assert_eq!(
+            lines[ART.len()..ART.len() + 4],
+            ["", "sally@app", "---------", "Repo: ~/repos/app"]
+        );
         assert!(banner.ends_with("\n\n"), "{banner}");
         assert!(!banner.contains('\x1b'), "{banner}");
     }

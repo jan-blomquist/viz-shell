@@ -5,6 +5,8 @@ target
 # env files hold secrets: vz refuses a tracked one
 .env
 .idea/
+# agent worktrees and local settings
+.claude/
 
 architecture.md
 LOG.md

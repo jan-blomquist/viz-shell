@@ -310,7 +310,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         env_names: &env_names,
         command,
     };
-    let show_banner = |container: &str, image: &str, state_text: &str| {
+    let show_banner = |container: &str, image: &str, attached: bool, persistent: bool| {
         if !(config.banner && command.is_empty() && tty) {
             return;
         }
@@ -323,7 +323,8 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         let facts = banner::Session {
             user: &user.name,
             container,
-            state: state_text,
+            attached,
+            persistent,
             home: &user.home,
             repo_root: &repo_root,
             branch: branch.as_deref(),
@@ -361,7 +362,12 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
             info!("starting {}", container.name);
             engine.start(&container.name).await?;
         }
-        show_banner(&container.name, &container.image, "attached");
+        show_banner(
+            &container.name,
+            &container.image,
+            true,
+            container.persistent,
+        );
         return engine.exec(enter(&container.name).args(), &values).await;
     }
 
@@ -415,10 +421,10 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     };
     if config.persistent {
         engine.start(&name).await?;
-        show_banner(&name, &image, "new, kept on exit");
+        show_banner(&name, &image, false, true);
         engine.exec(enter(&name).args(), &values).await
     } else {
-        show_banner(&name, &image, "new, removed on exit");
+        show_banner(&name, &image, false, false);
         engine.start_attached(&name).await
     }
 }
