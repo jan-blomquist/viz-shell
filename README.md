@@ -89,7 +89,7 @@ state:                                 # survives the container, kept in .vz_sta
   - /usr/local/cargo/registry
   - ~/.local/share/opencode
 mounts:
-  - ~/repos:ro                         # read-only; this repository stays read-write
+  - ~/repos                            # read-only; this repository stays read-write
 env:
   files: [.env]                        # read on the host, never mounted
   passthrough: [GH_TOKEN]
@@ -348,14 +348,15 @@ state:
 ## Mounts
 
 Host paths shown inside, reusing the host's own files: at the same path, unless a target names
-another. Written as docker's `-v`: `path[:target][:ro|rw]`. Mounts are read-write unless `:ro`.
+another. Written as docker's `-v`: `path[:target][:ro|rw]`. Mounts are read-only unless `:rw`.
+The default is read-only, `vz`'s secure-by-default posture; a mount says `:rw` to be writable.
 
 ```yaml
 mounts:
-  - ~/.config/gh                                        # read-write
-  - ~/repos:ro                                          # read-only
+  - ~/.config/gh:rw                                     # read-write
+  - ~/repos                                             # read-only
   - ~/repos/skills:~/.agents/skills                     # elsewhere inside
-  - ~/repos/skills:~/.config/opencode/skills:ro         # one source, several targets
+  - ~/repos/skills:~/.config/opencode/skills            # one source, several targets
 ```
 
 The map form says the same, key by key, and adds `enabled: false`, which removes an entry an
@@ -363,21 +364,21 @@ earlier layer added:
 
 ```yaml
 mounts:
-  - { path: ~/repos, mode: ro }
+  - { path: ~/.config/gh, mode: rw }
   - { path: ~/repos/skills, target: ~/.agents/skills, enabled: false }
 ```
 
 - Each path starts with `~/` or `/`; anything else, a mode other than `ro` or `rw`, or an empty
   field is refused, quoting the entry.
-- The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos:ro`:
+- The repository `vz` runs for is always read-write, even inside a read-only mount like `~/repos`:
   deeper mounts land on top. A mount that lands on the repository itself is skipped, so one repository
-  can be read-write for every session, its own included: `- ~/repos/notes`.
+  can be read-write for every session, its own included: `- ~/repos/notes:rw`.
   `VZ_LOG=viz_shell=debug` shows the skip.
 - A mount must exist on the host; `vz` never creates one.
 - A single file mounts too, with two catches: a read-write one breaks tools that save by renaming
   over it ("Device or resource busy"), and a running container keeps seeing the old version when
   the host replaces the file by renaming, as many editors and `git config` do. Folders have neither.
-- `- ~/.ssh:ro` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
+- `- ~/.ssh` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
   then readable by everything in the container: mount it only where you trust what runs there.
 - Mounts are keyed by their target, where they land, else their path: a profile updates or removes
   one by it, in either form, and one source may land in several places.
@@ -494,11 +495,11 @@ Named layers on top of the root of `vz.yml`, keyed by name, each with the same k
 
 ```yaml
 mounts:
-  - ~/repos:ro
+  - ~/repos
 
 profiles:
   writable:
-    mounts: [~/repos]                           # the same path: updated in its place, read-write
+    mounts: [~/repos:rw]                        # the same path: updated in its place, read-write
   isolated:
     mounts: [{ path: ~/repos, enabled: false }] # removed
   scratch:

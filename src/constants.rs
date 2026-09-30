@@ -1,3 +1,5 @@
+use crate::config::MountMode;
+
 /// The repository's configuration file at the git root: the first of these
 /// present is used; others present are ignored, with a warning.
 pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
@@ -166,3 +168,7 @@ pub const GROUPS_ENV: &str = "VZ_GROUPS";
 
 /// The docker socket's group name when the host has no name for its gid.
 pub const DOCKER_GROUP_NAME: &str = "docker";
+
+/// The mode of a mount that names none; a future `defaults:` setting may
+/// make it configurable.
+pub const DEFAULT_MOUNT_MODE: MountMode = MountMode::Ro;

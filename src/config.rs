@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_TAG, HOME_PREFIX};
+use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_TAG, HOME_PREFIX};
 
 /// The configuration files in effect, each optional, checked: every
 /// `extends` names a profile of either file, and none forms a cycle.
@@ -475,10 +475,10 @@ impl Keyed for StateItem {
     }
 }
 
-/// A mount: `path[:target][:ro|rw]`, read-write unless `:ro`, or expanded.
-/// Keyed by where it lands inside, so one host path can land in several
-/// places. A string is parsed as it is read: `Path` is a bare path,
-/// read-write; anything else is `Full`.
+/// A mount: `path[:target][:ro|rw]`, [`DEFAULT_MOUNT_MODE`] unless it names
+/// a mode, or expanded. Keyed by where it lands inside, so one host path can
+/// land in several places. A string is parsed as it is read: `Path` is a bare
+/// path in the default mode; anything else is `Full`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum MountItem {
@@ -510,9 +510,9 @@ impl From<MountSpec> for MountItem {
             MountSpec {
                 path,
                 target: None,
-                mode: MountMode::Rw,
+                mode,
                 enabled: true,
-            } => MountItem::Path(path),
+            } if mode.is_default() => MountItem::Path(path),
             spec => MountItem::Full(spec),
         }
     }
@@ -538,7 +538,8 @@ fn parse_mount(spec: &str) -> anyhow::Result<MountSpec> {
         target: target.map(|target| target.to_string()),
         mode: match mode {
             Some(&"ro") => MountMode::Ro,
-            _ => MountMode::Rw,
+            Some(_) => MountMode::Rw,
+            None => MountMode::default(),
         },
         enabled: true,
     })
@@ -552,23 +553,28 @@ pub struct MountSpec {
     /// Inside the container; the same as `path` when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(default, skip_serializing_if = "MountMode::is_rw")]
+    #[serde(default, skip_serializing_if = "MountMode::is_default")]
     pub mode: MountMode,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MountMode {
     Ro,
-    #[default]
     Rw,
 }
 
+impl Default for MountMode {
+    fn default() -> Self {
+        DEFAULT_MOUNT_MODE
+    }
+}
+
 impl MountMode {
-    fn is_rw(&self) -> bool {
-        *self == MountMode::Rw
+    fn is_default(&self) -> bool {
+        *self == MountMode::default()
     }
 }
 
@@ -1039,7 +1045,7 @@ impl EffectiveConfig {
                 MountItem::Path(path) => MountEntry {
                     path: path.clone(),
                     target: None,
-                    mode: MountMode::Rw,
+                    mode: MountMode::default(),
                     file: mount_file(entry.key()),
                 },
                 MountItem::Full(spec) => MountEntry {
@@ -1333,14 +1339,14 @@ mod tests {
     const BASE: &str = "\
 image: debian
 mounts:
-  - ~/repos:ro
-  - ~/.gitconfig:ro
+  - ~/repos
+  - ~/.gitconfig
 state:
   - ~/.cache
 profiles:
   writable:
     mounts:
-      - ~/repos
+      - ~/repos:rw
   bare:
     mounts:
       - { path: ~/repos, enabled: false }
@@ -1402,7 +1408,7 @@ state:
     }
 
     #[test]
-    fn effective__mount_forms__bare_is_read_write_disabled_dropped() {
+    fn effective__mount_forms__bare_is_read_only_disabled_dropped() {
         let text = "\
 image: debian
 mounts:
@@ -1415,7 +1421,7 @@ mounts:
         let config = effective(text, None);
 
         let expected = vec![
-            mount("~/a", MountMode::Rw),
+            mount("~/a", MountMode::Ro),
             mount("~/b", MountMode::Ro),
             mount("~/c", MountMode::Rw),
         ];
@@ -1926,7 +1932,7 @@ profiles:
     fn effective__mount_targets__one_source_at_several_keyed_by_target() {
         let with_target = |target: &str| MountEntry {
             target: Some(target.to_owned()),
-            ..mount("~/skills", MountMode::Rw)
+            ..mount("~/skills", MountMode::Ro)
         };
         let cases = [
             (
@@ -1934,14 +1940,14 @@ profiles:
                 vec![
                     with_target("~/.agents/skills"),
                     with_target("~/.config/opencode/skills"),
-                    mount("~/same", MountMode::Rw),
+                    mount("~/same", MountMode::Ro),
                 ],
             ),
             (
                 Some("agents-only"),
                 vec![
                     with_target("~/.agents/skills"),
-                    mount("~/same", MountMode::Rw),
+                    mount("~/same", MountMode::Ro),
                 ],
             ),
         ];
@@ -1971,12 +1977,12 @@ profiles:
     #[test]
     fn parse_mount__every_accepted_form__yields_path_target_mode() {
         let cases = [
-            ("~/repos", spec("~/repos", None, MountMode::Rw)),
+            ("~/repos", spec("~/repos", None, MountMode::Ro)),
             ("~/repos:ro", spec("~/repos", None, MountMode::Ro)),
             ("~/repos:rw", spec("~/repos", None, MountMode::Rw)),
             (
                 "~/skills:~/.agents/skills",
-                spec("~/skills", Some("~/.agents/skills"), MountMode::Rw),
+                spec("~/skills", Some("~/.agents/skills"), MountMode::Ro),
             ),
             (
                 "~/skills:~/.agents/skills:ro",
@@ -1986,7 +1992,7 @@ profiles:
                 "~/skills:~/.config/opencode/skills:rw",
                 spec("~/skills", Some("~/.config/opencode/skills"), MountMode::Rw),
             ),
-            ("/srv/data", spec("/srv/data", None, MountMode::Rw)),
+            ("/srv/data", spec("/srv/data", None, MountMode::Ro)),
             (
                 "/srv/data:/mnt/data:ro",
                 spec("/srv/data", Some("/mnt/data"), MountMode::Ro),
@@ -2022,15 +2028,15 @@ profiles:
     #[test]
     fn effective__mount_map_form__matches_string_form() {
         let cases = [
-            ("~/repos:ro", "{ path: ~/repos, mode: ro }"),
-            ("~/repos", "{ path: ~/repos, mode: rw }"),
+            ("~/repos:rw", "{ path: ~/repos, mode: rw }"),
+            ("~/repos", "{ path: ~/repos, mode: ro }"),
             (
                 "~/skills:~/.agents/skills",
                 "{ path: ~/skills, target: ~/.agents/skills }",
             ),
             (
-                "~/skills:~/.agents/skills:ro",
-                "{ path: ~/skills, target: ~/.agents/skills, mode: ro }",
+                "~/skills:~/.agents/skills:rw",
+                "{ path: ~/skills, target: ~/.agents/skills, mode: rw }",
             ),
         ];
         let mounts =
@@ -2044,8 +2050,8 @@ profiles:
     fn effective__string_form_in_a_profile__layers_by_target_else_path() {
         let cases = [
             (
-                "- ~/repos:ro",
                 "- ~/repos",
+                "- ~/repos:rw",
                 vec![mount("~/repos", MountMode::Rw)],
             ),
             (
@@ -2067,26 +2073,48 @@ profiles:
         }
     }
 
+    /// The mode a mount must name, whichever the default is.
+    fn non_default_mode() -> &'static str {
+        match DEFAULT_MOUNT_MODE {
+            MountMode::Ro => "rw",
+            MountMode::Rw => "ro",
+        }
+    }
+
     #[test]
-    fn to_yaml__mounts__bare_when_read_write_else_the_map_form() {
-        let text = "\
-image: debian
-mounts:
-  - ~/repos
-  - ~/notes:ro
-  - ~/skills:~/.agents/skills
-";
-        let config = effective(text, None);
+    fn effective__mount_without_a_mode__has_the_default_mode() {
+        let forms = ["~/repos", "{ path: ~/repos }", "~/skills:~/.agents/skills"];
+        for form in forms {
+            let text = format!("image: debian\nmounts:\n  - {form}\n");
+
+            let modes: Vec<MountMode> = effective(&text, None)
+                .mounts
+                .iter()
+                .map(|entry| entry.mode)
+                .collect();
+
+            assert_eq!(modes, vec![DEFAULT_MOUNT_MODE], "{form}");
+        }
+    }
+
+    #[test]
+    fn to_yaml__mounts__bare_for_the_default_mode_else_the_map_form() {
+        let word = non_default_mode();
+        let text = format!(
+            "image: debian\nmounts:\n  - ~/repos\n  - ~/notes:{word}\n  - ~/skills:~/.agents/skills\n"
+        );
+        let config = effective(&text, None);
 
         let yaml = config.to_yaml().unwrap();
 
         let emitted = (
             yaml.contains("- ~/repos\n"),
-            yaml.contains("path: ~/notes") && yaml.contains("mode: ro"),
+            yaml.contains("path: ~/notes") && yaml.contains(&format!("mode: {word}")),
+            yaml.matches("mode:").count(),
             yaml.contains("target: ~/.agents/skills"),
             effective(&yaml, None).mounts == config.mounts,
         );
-        assert_eq!(emitted, (true, true, true, true), "{yaml}");
+        assert_eq!(emitted, (true, true, 1, true, true), "{yaml}");
     }
 
     #[test]
@@ -2119,7 +2147,7 @@ mounts:
         let yaml = effective(text, None).to_yaml().unwrap();
 
         assert!(
-            yaml.contains("- ~/.a") && yaml.contains("mode: ro") && yaml.contains("- ~/c"),
+            yaml.contains("- ~/.a") && yaml.matches("mode:").count() == 1,
             "{yaml}"
         );
     }
@@ -2492,8 +2520,8 @@ profiles:
 
     #[test]
     fn effective__mounts_across_files__each_from_the_file_that_set_it_last() {
-        let global = "image: debian\nmounts:\n  - ~/a:ro\n  - ~/b\n";
-        let repo = "mounts:\n  - ~/a\nprofiles:\n  extra:\n    mounts:\n      - ~/c\n";
+        let global = "image: debian\nmounts:\n  - ~/a\n  - ~/b\n";
+        let repo = "mounts:\n  - ~/a:rw\nprofiles:\n  extra:\n    mounts:\n      - ~/c\n";
 
         let config = both(global, repo).effective(Some("extra")).unwrap();
 

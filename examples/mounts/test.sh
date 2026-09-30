@@ -17,10 +17,10 @@ expect_output "a read-only mount is readable" "hello" inside cat "$HOME/repos/ot
 expect_failure "and not writable" inside touch "$HOME/repos/other/new"
 expect_success "the repository inside it stays writable" inside touch "$app/new"
 expect_output "and what you create there is yours" "$(id -u)" stat -c %u "$app/new"
-expect_success "a bare mount is writable" inside sh -c 'echo token > ~/.config/gh/hosts.yml'
+expect_success "a :rw mount is writable" inside sh -c 'echo token > ~/.config/gh/hosts.yml'
 expect_output "and the host sees the change" "token" cat "$HOME/.config/gh/hosts.yml"
 expect_output "a single file can be mounted" "[user]" inside cat "$HOME/.gitconfig"
-expect_failure "and read-only with :ro" inside sh -c 'echo x >> ~/.gitconfig'
+expect_failure "read-only by default" inside sh -c 'echo x >> ~/.gitconfig'
 expect_output "a mount with a target shows the host folder there" "shelf" \
     inside cat "$HOME/.agents/library/book"
 expect_output "the folder around it is yours" "$(id -u)" inside stat -c %u "$HOME/.agents"

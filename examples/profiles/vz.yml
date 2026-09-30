@@ -6,13 +6,13 @@ state_dir: .vz_state
 
 # The root: what plain `vz` runs with.
 mounts:
-  - ~/repos:ro
+  - ~/repos
 
 profiles:
-  # The same mount, now read-write: bare, the default.
+  # The same mount, now read-write.
   writable:
     mounts:
-      - ~/repos
+      - ~/repos:rw
 
   # The mount removed.
   isolated:
