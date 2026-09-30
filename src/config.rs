@@ -1,9 +1,10 @@
-//! Configuration: the global file and the repository's, each a root [`Layer`]
-//! with named profiles of the same shape. [`Config::effective`] applies them
-//! in order and resolves the result into the [`EffectiveConfig`] vz runs with:
-//! global root, repo root, then for each profile of the chosen one's
-//! `extends` chain, its global section, then its repo section. A profile is a
-//! mode: each file says what it adds in it.
+//! Configuration: the global file, the repository's and your local overlay
+//! of it, each a root [`Layer`] with named profiles of the same shape.
+//! [`Config::effective`] applies them in order and resolves the result into
+//! the [`EffectiveConfig`] vz runs with: global root, repo root, local root,
+//! then for each profile of the chosen one's `extends` chain, its global,
+//! repo and local sections. A profile is a mode: each file says what it adds
+//! in it.
 //!
 //! Collections are lists of entries, each keyed by its path or name: a bare
 //! entry for the common case, the expanded form for anything else, and
@@ -21,11 +22,12 @@ use serde::{Deserialize, Serialize};
 use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_TAG, HOME_PREFIX};
 
 /// The configuration files in effect, each optional, checked: every
-/// `extends` names a profile of either file, and none forms a cycle.
+/// `extends` names a profile of any file, and none forms a cycle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     global: Option<Layer>,
     repo: Option<Layer>,
+    local: Option<Layer>,
 }
 
 /// One of the configuration files: where an effective entry was last set.
@@ -33,14 +35,16 @@ pub struct Config {
 pub enum ConfigFile {
     Global,
     Repository,
+    Local,
 }
 
 impl ConfigFile {
-    /// As the layers' labels name it: `global`, `repo`.
-    fn origin(self) -> &'static str {
+    /// As the layers' labels name it: `global`, `repo`, `local`.
+    pub fn origin(self) -> &'static str {
         match self {
             ConfigFile::Global => "global",
             ConfigFile::Repository => "repo",
+            ConfigFile::Local => "local",
         }
     }
 }
@@ -49,7 +53,7 @@ impl ConfigFile {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileInfo {
     pub name: String,
-    /// `global`, `repo`, or both, in that order.
+    /// `global`, `repo`, `local`: those that define it, in that order.
     pub defined_in: Vec<&'static str>,
     pub extends: Option<String>,
     /// What its sections change, in a few words each: `sudo`, `2 mounts`, …
@@ -677,18 +681,26 @@ pub struct MountEntry {
 }
 
 impl Config {
-    /// Checks the profiles across both files.
-    pub fn new(global: Option<Layer>, repo: Option<Layer>) -> anyhow::Result<Self> {
-        let config = Self { global, repo };
+    /// Checks the profiles across the files.
+    pub fn new(
+        global: Option<Layer>,
+        repo: Option<Layer>,
+        local: Option<Layer>,
+    ) -> anyhow::Result<Self> {
+        let config = Self {
+            global,
+            repo,
+            local,
+        };
         for name in config.profile_names() {
             config.chain(&name)?;
         }
         Ok(config)
     }
 
-    /// Global root, repo root, then for each profile of the chosen one's
-    /// chain, from its start: its global section, then its repo section.
-    /// Later layers win per field and per key.
+    /// Global root, repo root, local root, then for each profile of the
+    /// chosen one's chain, from its start: its global, repo and local
+    /// sections. Later layers win per field and per key.
     pub fn effective(&self, profile: Option<&str>) -> anyhow::Result<EffectiveConfig> {
         let chain = match profile {
             Some(name) => self.chain(name)?,
@@ -746,6 +758,7 @@ impl Config {
         [
             (ConfigFile::Global, self.global.as_ref()),
             (ConfigFile::Repository, self.repo.as_ref()),
+            (ConfigFile::Local, self.local.as_ref()),
         ]
         .into_iter()
         .filter_map(|(file, layer)| Some((file, layer?)))
@@ -757,7 +770,7 @@ impl Config {
             .collect()
     }
 
-    /// The repo's `extends` for a profile, else the global one's.
+    /// The last file's `extends` for a profile: local, else repo, else global.
     fn extends(&self, name: &str) -> Option<&str> {
         self.files()
             .filter_map(|(_, file)| file.profiles.get(name)?.extends.as_deref())
@@ -1307,7 +1320,7 @@ mod tests {
 
     /// A repository configuration alone.
     fn repo(text: &str) -> Config {
-        Config::new(None, Some(Layer::parse(text).unwrap())).unwrap()
+        Config::new(None, Some(Layer::parse(text).unwrap()), None).unwrap()
     }
 
     fn effective(text: &str, profile: Option<&str>) -> EffectiveConfig {
@@ -1315,7 +1328,7 @@ mod tests {
     }
 
     fn error(text: &str) -> String {
-        let result = Layer::parse(text).and_then(|layer| Config::new(None, Some(layer)));
+        let result = Layer::parse(text).and_then(|layer| Config::new(None, Some(layer), None));
         format!("{:#}", result.unwrap_err())
     }
 
@@ -2307,7 +2320,7 @@ mounts:
 
     #[test]
     fn default_global__is_valid_with_each_profile() {
-        let config = Config::new(Some(Layer::parse(DEFAULT_GLOBAL).unwrap()), None).unwrap();
+        let config = Config::new(Some(Layer::parse(DEFAULT_GLOBAL).unwrap()), None, None).unwrap();
 
         for profile in [None, Some("trusted")] {
             assert!(config.effective(profile).is_ok(), "profile: {profile:?}");
@@ -2361,8 +2374,9 @@ mounts:
             if global.is_none() && repo.is_none() {
                 continue;
             }
-            let config =
-                Config::new(global, repo).unwrap_or_else(|e| panic!("{}: {e:#}", dir.display()));
+            let local = read(crate::repo::local_config_file(&dir));
+            let config = Config::new(global, repo, local)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", dir.display()));
             let profiles = [None].into_iter().chain(
                 config
                     .profiles()
@@ -2411,18 +2425,25 @@ profiles:
     const SALLY: &str = "/home/sally";
     const APP: &str = "/home/sally/repos/app";
 
-    /// Each text read as `load` reads its file: paths resolved against its
+    /// The text read as `load` reads its file: paths resolved against its
     /// own folder.
+    fn read(text: &str, dir: &str) -> Layer {
+        let mut layer = Layer::parse(text).unwrap();
+        layer
+            .resolve_paths(Path::new(dir), Path::new(SALLY), Path::new(APP))
+            .unwrap();
+        layer
+    }
+
     fn both(global: &str, repo: &str) -> Config {
-        let read = |text: &str, dir: &str| {
-            let mut layer = Layer::parse(text).unwrap();
-            layer
-                .resolve_paths(Path::new(dir), Path::new(SALLY), Path::new(APP))
-                .unwrap();
-            layer
-        };
         let global = read(global, "/home/sally/.config/viz-shell");
-        Config::new(Some(global), Some(read(repo, APP))).unwrap()
+        Config::new(Some(global), Some(read(repo, APP)), None).unwrap()
+    }
+
+    fn all_three(global: &str, repo: &str, local: &str) -> Config {
+        let global = read(global, "/home/sally/.config/viz-shell");
+        let (repo, local) = (read(repo, APP), read(local, APP));
+        Config::new(Some(global), Some(repo), Some(local)).unwrap()
     }
 
     fn who(config: &EffectiveConfig) -> &str {
@@ -2572,12 +2593,123 @@ profiles:
         assert_eq!(profiles, expected);
     }
 
+    const GLOBAL_OF_THREE: &str = "\
+image: debian
+shell: bash
+env:
+  defaults: { WHO: global }
+mounts:
+  - ~/shared
+profiles:
+  base:
+    env:
+      defaults: { WHO: global-base }
+";
+
+    const REPO_OF_THREE: &str = "\
+shell: zsh
+env:
+  defaults: { WHO: repo }
+mounts:
+  - ~/shared:rw
+profiles:
+  extra:
+    extends: base
+    env:
+      defaults: { WHO: repo-extra }
+    mounts:
+      - ~/extra
+";
+
+    const LOCAL_OF_THREE: &str = "\
+shell: fish
+env:
+  defaults: { WHO: local }
+mounts:
+  - ~/shared:ro
+profiles:
+  extra:
+    env:
+      defaults: { WHO: local-extra }
+";
+
+    #[test]
+    fn effective__three_files__local_over_repo_over_global() {
+        let config = all_three(GLOBAL_OF_THREE, REPO_OF_THREE, LOCAL_OF_THREE);
+        let shared = ("/home/sally/shared", MountMode::Ro, ConfigFile::Local);
+        let extra = ("/home/sally/extra", MountMode::Ro, ConfigFile::Repository);
+        let roots = ["global root", "repo root", "local root"];
+        let cases: [(Option<&str>, &[&str], &str, &[_]); 3] = [
+            (None, &[], "local", &[shared]),
+            // The chosen profile beats every root.
+            (Some("base"), &["global base"], "global-base", &[shared]),
+            // Local's `extra` merges over the repo's, which extends the global `base`.
+            (
+                Some("extra"),
+                &["global base", "repo extra", "local extra"],
+                "local-extra",
+                &[shared, extra],
+            ),
+        ];
+        for (profile, sections, expected_who, expected_mounts) in cases {
+            let effective = config.effective(profile).unwrap();
+
+            let layers: Vec<&str> = roots.iter().chain(sections).copied().collect();
+            assert_eq!(effective.layers, layers, "{profile:?}");
+            assert_eq!(effective.shell.as_deref(), Some("fish"), "{profile:?}");
+            assert_eq!(who(&effective), expected_who, "{profile:?}");
+            let mounts: Vec<(&str, MountMode, ConfigFile)> = effective
+                .mounts
+                .iter()
+                .map(|mount| (mount.path.as_str(), mount.mode, mount.file))
+                .collect();
+            assert_eq!(mounts, expected_mounts, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn profiles__three_files__local_listed_last() {
+        let config = all_three(GLOBAL_OF_THREE, REPO_OF_THREE, LOCAL_OF_THREE);
+
+        let profiles = config.profiles();
+
+        let defined_in: Vec<(&str, &[&str])> = profiles
+            .iter()
+            .map(|profile| (profile.name.as_str(), profile.defined_in.as_slice()))
+            .collect();
+        assert_eq!(
+            defined_in,
+            [("base", &["global"][..]), ("extra", &["repo", "local"][..])]
+        );
+    }
+
+    #[test]
+    fn new__local_extends__overrides_the_repo_s_extends() {
+        let local = "profiles:\n  extra:\n    extends: other\n";
+        let global = format!("{GLOBAL_OF_THREE}  other:\n    shell: sh\n");
+
+        let config = all_three(&global, REPO_OF_THREE, local);
+
+        let layers = config.effective(Some("extra")).unwrap().layers;
+        assert_eq!(
+            layers,
+            [
+                "global root",
+                "repo root",
+                "local root",
+                "global other",
+                "repo extra",
+                "local extra"
+            ]
+        );
+    }
+
     #[test]
     fn new__extends_a_profile_neither_file_defines__is_refused_naming_both_files_profiles() {
         let repo = Layer::parse("profiles:\n  ci:\n    extends: nope\n").unwrap();
         let global = Layer::parse(GLOBAL).unwrap();
 
-        let error = Config::new(Some(global), Some(repo))
+        let error = Config::new(Some(global), Some(repo), None)
             .unwrap_err()
             .to_string();
 

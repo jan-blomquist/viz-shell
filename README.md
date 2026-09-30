@@ -111,6 +111,7 @@ profiles:
 ## Guide
 
 - [Use](#use)
+- [Whose file is it](#whose-file-is-it)
 - [Sessions](#sessions)
 - [Images](#images)
 - [Your user in the image](#your-user-in-the-image)
@@ -122,6 +123,7 @@ profiles:
 - [Hooks](#hooks)
 - [Profiles](#profiles)
 - [Global configuration](#global-configuration)
+- [Local configuration](#local-configuration)
 - [Examples](#examples)
 - [Logging](#logging)
 - [Development](#development)
@@ -135,7 +137,7 @@ vz -- cargo test    # one command instead
 vz -c other.yml     # another configuration: -c, --config-file
 vz --profile ci     # a profile from vz.yml; or VZ_PROFILE=ci
 vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
-vz profiles         # the profiles of the global and the repository configuration
+vz profiles         # the profiles of the global, repository and local configuration
 vz new api          # a container named api; see Sessions
 vz attach 0         # a shell in container 0 of this repository; or `vz at api`
 vz ls               # this repository's containers; --all for every repository's
@@ -143,7 +145,8 @@ vz kill 0 api       # removes containers; --all for all of this repository's
 ```
 
 `vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
-`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or
+`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file, with the
+[global](#global-configuration) and your [local](#local-configuration) configuration. It pulls or
 builds the image if missing, and runs a container, removed on exit unless `persistent`, with its
 [hooks](#hooks): `create` once, `attach` before every shell or command. `vz` exits with the shell's,
 or the command's, exit code. Inside:
@@ -173,14 +176,14 @@ Version: 0.1.0
 Session: new, ephemeral
 Repo: ~/repos/app
 Branch: main
-Config: global.yml, viz-shell.yml
+Config: global.yml, viz-shell.yml, viz-shell.local.yml
 Profile: trusted
 Image: vz-app:3f9c2a1b7d4e8f60
 Shell: fish
 Sudo: yes
 Docker: /run/user/1000/docker.sock
 Network: host
-Mounts: 3 (2 global.yml, 1 viz-shell.yml)
+Mounts: 4 (2 global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)
 State: 2 paths in ~/repos/app/.vz_state
 Env: 3 variables
 Hooks: 2 create, 1 attach
@@ -201,6 +204,18 @@ state:
 ```
 
 Unknown keys in `vz.yml` are refused, naming the line.
+
+## Whose file is it
+
+| File | Owner | Checked in | Says |
+|---|---|---|---|
+| `viz-shell.yml` | the repository | yes | the portable dev environment: image, state, shell, hooks, share, privileges, `env` with its `.env` files and passthrough names |
+| `global.yml` | you, everywhere | no | your tools, mounts, credentials, banner, shell preference |
+| `viz-shell.local.yml` | you, in this repository | no | mounts and values only this checkout needs |
+
+The portability test for the repository file: no host path outside the repository, except `state`,
+which lives inside it. A random user cloning the repository and running `vz` gets the environment;
+what they bring is theirs.
 
 ## Sessions
 
@@ -466,7 +481,7 @@ vz --show-env                   # every name and where it comes from, never a va
   `#` comments, `export`, and quotes around values with spaces.
 - `defaults` is a map, keyed by variable name: a profile overrides per name, `null` removes one.
   `files` and `passthrough` are lists: expanded forms `{ path, required, enabled }` and `{ name, enabled }`.
-- An env file tracked by git is refused: its values would be in the repository's history.
+- An env file tracked by git is loaded with a warning: its values are in the repository's history.
 - Values reach the container by name (`docker create --env NAME`, and `docker exec` when attaching),
   never on a command line or in a log;
   `--show-effective-config` and `--show-env` never print a value from a file or the host.
@@ -541,13 +556,13 @@ none, and never overwrites it: an untrusted default with the banner on, and a `t
 with sudo, docker, the host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
 
 - A repository without a configuration runs from the global one alone.
-- Layers, later wins: global root, repository root, then for the chosen profile and each it extends
-  (first extended first): its global section, then its repository section.
+- Layers, later wins: global root, repository root, [local](#local-configuration) root, then for the
+  chosen profile and each it extends (first extended first): its global, repository and local sections.
 
 | `vz` | layers |
 |---|---|
-| `vz` | global root → repo root |
-| `vz --profile trusted` | … → global `trusted` → repo `trusted` |
+| `vz` | global root → repo root → local root |
+| `vz --profile trusted` | … → global `trusted` → repo `trusted` → local `trusted` |
 | `vz --profile ci`, repo `ci: { extends: trusted }` | … → global `trusted` → repo `trusted` → repo `ci` |
 
 - A profile is a mode: each file says what it adds in it. A repository's `trusted:` adds to the global
@@ -561,6 +576,28 @@ Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, wh
 file or share the docker daemon. Review a repository's configuration as you would its code. What
 protects the host is what reaches the container: only the repository, and what the configuration
 shares, mounts or grants; and, unless `privileges.sudo` is granted, the secure floor inside it.
+
+## Local configuration
+
+Your own overlay of the repository's configuration, for this checkout only: a mount of a sibling
+repository, a value only your machine needs. Same shape as `vz.yml`.
+
+```yaml
+# viz-shell.local.yml
+mounts:
+  - ~/repos/shared-lib:rw     # the repository mounts it read-only; here, writable
+env:
+  defaults: { API_URL: http://localhost:8081 }
+```
+
+- At the git root, next to the repository's file: the first of `viz-shell.local.yml`,
+  `viz-shell.local.yaml`, `vz.local.yml`, `vz.local.yaml`. With `-c foo.yml`, `foo.local.yml` next to it.
+- Order: global, repository, local; later wins. Profiles from all three merge by name: a local
+  `trusted:` adds to the repository's and the global one.
+- Meant to be ignored by git: add `*.local.yml` to `.gitignore`, or to your global gitignore. `vz`
+  warns when it is tracked.
+- A local file alone is no configuration: it needs a repository or a global one.
+- `--show-effective-config` names it and lists its layers: `local root`, `local <profile>`.
 
 ## Examples
 
@@ -578,6 +615,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 | [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight, the `TERM` fallback |
 | [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
+| [`local`](examples/local) | a local overlay over the repository's file: a value, a mount's mode, an added mount, a profile; the warning when it is tracked |
 | [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in a profile; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |

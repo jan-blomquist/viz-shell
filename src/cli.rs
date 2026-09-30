@@ -73,7 +73,7 @@ pub enum Action {
         #[arg(long, conflicts_with = "targets")]
         all: bool,
     },
-    /// List the profiles of the global and the repository configuration
+    /// List the profiles of the global, repository and local configuration
     Profiles,
     /// Inside the container: add the host user, then run the command as it,
     /// or hold for shells to attach

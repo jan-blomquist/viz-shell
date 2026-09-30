@@ -4,6 +4,19 @@ use crate::config::MountMode;
 /// present is used; others present are ignored, with a warning.
 pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
 
+/// Your own overlay of the repository's configuration, never checked in:
+/// each of `REPO_CONFIG_FILES` with `.local` before its extension, found
+/// by the same rule.
+pub const LOCAL_CONFIG_FILES: [&str; 4] = [
+    "viz-shell.local.yml",
+    "viz-shell.local.yaml",
+    "vz.local.yml",
+    "vz.local.yaml",
+];
+
+/// Inserted before a configuration file's extension to name its local overlay.
+pub const LOCAL_SUFFIX: &str = "local";
+
 /// The global configuration: `$XDG_CONFIG_HOME/viz-shell/global.yml`, or
 /// `~/.config/viz-shell/global.yml` without it. What every repository starts from.
 pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";

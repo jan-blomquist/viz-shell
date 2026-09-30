@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::build::BuildPlan;
 use crate::cli::{Action, Cli};
-use crate::config::{Config, ImageSource, Layer};
+use crate::config::{Config, ConfigFile, ImageSource, Layer};
 use crate::constants::{
     CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
     ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
@@ -75,22 +75,37 @@ struct Loaded {
     user: User,
     global_file: Option<PathBuf>,
     repo_file: Option<PathBuf>,
+    local_file: Option<PathBuf>,
     config: Config,
 }
 
 impl Loaded {
-    /// `# global …, repo …`: the files read.
+    /// The files read, each with its origin: global, repo, local, in that order.
+    fn files(&self) -> Vec<(ConfigFile, &Path)> {
+        [
+            (ConfigFile::Global, &self.global_file),
+            (ConfigFile::Repository, &self.repo_file),
+            (ConfigFile::Local, &self.local_file),
+        ]
+        .into_iter()
+        .filter_map(|(file, path)| Some((file, path.as_deref()?)))
+        .collect()
+    }
+
+    /// `# global …, repo …, local …`: the files read.
     fn files_line(&self) -> String {
-        let files: Vec<String> = [("global", &self.global_file), ("repo", &self.repo_file)]
+        let files: Vec<String> = self
+            .files()
             .into_iter()
-            .filter_map(|(origin, file)| Some(format!("{origin} {}", file.as_ref()?.display())))
+            .map(|(file, path)| format!("{} {}", file.origin(), path.display()))
             .collect();
         files.join(", ")
     }
 }
 
 /// Reads the global configuration and the repository's, either optional
-/// but not both. `-c` names the repository's.
+/// but not both, then your local overlay of the repository's, if any. `-c`
+/// names the repository's; its overlay is next to it.
 fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
     let repo_root = repo::root()?;
     let user = User::of_host()?;
@@ -117,17 +132,31 @@ fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
         REPO_CONFIG_FILES.join(", "),
         global_path.display()
     );
+    let local_file = match config_file {
+        Some(_) => repo_file
+            .as_deref()
+            .map(repo::local_file_for)
+            .filter(|file| file.is_file()),
+        None => repo::local_config_file(&repo_root),
+    };
+    if let Some(file) = &local_file
+        && repo::is_tracked(file)
+    {
+        let name = file.file_name().unwrap_or_default().to_string_lossy();
+        warn!("{name} is tracked by git: it is meant to be personal");
+    }
     let read = |file: &Option<PathBuf>| {
         file.as_deref()
             .map(|file| Layer::load(file, &user.home, &repo_root))
             .transpose()
     };
-    let config = Config::new(read(&global_file)?, read(&repo_file)?)?;
+    let config = Config::new(read(&global_file)?, read(&repo_file)?, read(&local_file)?)?;
     Ok(Loaded {
         repo_root,
         user,
         global_file,
         repo_file,
+        local_file,
         config,
     })
 }
@@ -147,7 +176,7 @@ fn global_config_file() -> anyhow::Result<PathBuf> {
 fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
     let profiles = loaded.config.profiles();
     if profiles.is_empty() {
-        println!("No profiles yet: add them under `profiles:` in either file.");
+        println!("No profiles yet: add them under `profiles:` in any file.");
     } else {
         let rows = profiles.into_iter().map(|profile| {
             [
@@ -162,10 +191,11 @@ fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
         print_table(["PROFILE", "FROM", "EXTENDS", "CHANGES"], rows);
     }
     println!();
-    let files = [("global", &loaded.global_file), ("repo", &loaded.repo_file)];
-    let rows = files.into_iter().filter_map(|(origin, file)| {
-        let file = file.as_ref()?;
-        Some([origin.to_owned(), config::tilde(file, &loaded.user.home)])
+    let rows = loaded.files().into_iter().map(|(file, path)| {
+        [
+            file.origin().to_owned(),
+            config::tilde(path, &loaded.user.home),
+        ]
     });
     print_table(["FROM", "FILE"], rows);
     Ok(())
@@ -225,12 +255,13 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         return Ok(0);
     }
     debug!("effective configuration: {config:?}");
+    let config_files: Vec<(ConfigFile, PathBuf)> = loaded
+        .files()
+        .into_iter()
+        .map(|(file, path)| (file, path.to_owned()))
+        .collect();
     let Loaded {
-        repo_root,
-        user,
-        global_file,
-        repo_file,
-        ..
+        repo_root, user, ..
     } = loaded;
     // Paths are absolute by now; the repository root is the base of the rest.
     let config_dir = repo_root.clone();
@@ -316,10 +347,9 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
             return;
         }
         let branch = repo::branch(&repo_root);
-        let config_files: Vec<&Path> = [&global_file, &repo_file]
-            .into_iter()
-            .flatten()
-            .map(PathBuf::as_path)
+        let config_files: Vec<(ConfigFile, &Path)> = config_files
+            .iter()
+            .map(|(file, path)| (*file, path.as_path()))
             .collect();
         let facts = banner::Session {
             user: &user.name,
