@@ -17,10 +17,27 @@ pub const LOCAL_CONFIG_FILES: [&str; 4] = [
 /// Inserted before a configuration file's extension to name its local overlay.
 pub const LOCAL_SUFFIX: &str = "local";
 
-/// The global configuration: `$XDG_CONFIG_HOME/viz-shell/global.yml`, or
-/// `~/.config/viz-shell/global.yml` without it. What every repository starts from.
+/// The global configuration's folder: `$XDG_CONFIG_HOME/viz-shell`, or
+/// `~/.config/viz-shell` without it.
 pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";
-pub const GLOBAL_CONFIG_FILE: &str = "global.yml";
+
+/// The global configuration in its folder, by the same rule as
+/// `REPO_CONFIG_FILES`; a first run writes the first. What every repository
+/// starts from.
+pub const GLOBAL_CONFIG_FILES: [&str; 4] = [
+    "viz-shell.global.yml",
+    "viz-shell.global.yaml",
+    "vz.global.yml",
+    "vz.global.yaml",
+];
+
+/// The global configuration's former name, still read when none of
+/// `GLOBAL_CONFIG_FILES` is present.
+pub const LEGACY_GLOBAL_CONFIG_FILE: &str = "global.yml";
+
+/// The base image's Dockerfile, written next to the global configuration on
+/// a first run; the default global configuration builds it.
+pub const BASE_DOCKERFILE: &str = "viz-shell.base.Dockerfile";
 
 /// Selects a profile when `--profile` is not given; CI sets it once.
 pub const PROFILE_ENV: &str = "VZ_PROFILE";

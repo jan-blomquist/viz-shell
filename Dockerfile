@@ -1,14 +1,17 @@
 # syntax=docker/dockerfile:1
-# The development image for this repository: viz-shell-base plus the Rust
-# toolchain pinned in rust-toolchain.toml, fish, and vz built from this
-# checkout. `just build-base-images` builds the base first.
+# The development image for this repository: the Rust toolchain pinned in
+# rust-toolchain.toml, fish, and vz built from this checkout, on BASE.
 #
 # apt when Debian's version will do; otherwise the vendor's release, verified
 # by sha256. Every tool is pinned to an exact version: the image's content hash
 # then names one toolset, on every machine that builds it.
 
-# The image this one starts from; a user may supply another with the same contract.
-ARG BASE=ghcr.io/jan-blomquist/viz-shell-base:2026.9.2
+# The image this one starts from. Under a global configuration whose image is
+# the base, vz passes that image as BASE; alone, as in CI, Debian, pinned.
+ARG BASE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+
+# Static binaries, published by Docker as this image.
+FROM docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca AS docker-cli
 
 # Vendor releases, verified by sha256; bind-mounted below, so no layer keeps
 # them. x86_64 only for now.
@@ -31,6 +34,18 @@ ADD --chmod=755 --checksum=sha256:dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a
 
 FROM ${BASE} AS toolchain
 ARG DEBIAN_FRONTEND=noninteractive
+# What vz's features need, as the base Dockerfile installs it, so the image
+# also stands alone: sudo, the docker CLI, en_US.UTF-8, CA certificates. On
+# the base, these lines change nothing.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates locales sudo \
+ && rm -rf /var/lib/apt/lists/* \
+ && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen \
+ && locale-gen
+ENV LANG=C.UTF-8
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
+
 # fish, the shell viz-shell.yml names; git and curl; the linker rustc calls, and
 # its C library.
 RUN apt-get update \

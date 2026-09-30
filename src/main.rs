@@ -26,10 +26,10 @@ use crate::build::ImageStep;
 use crate::cli::{Action, Cli};
 use crate::config::{Config, ConfigFile, Layer};
 use crate::constants::{
-    CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
-    ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
-    HOME_ENV, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV,
-    REPO_CONFIG_FILES, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
+    BASE_DOCKERFILE, CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR,
+    DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILES, GROUP_ENV,
+    GROUPS_ENV, HOME_ENV, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LOG_ENV, MOUNTINFO_FILE,
+    PASSTHROUGH_ENV, REPO_CONFIG_FILES, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
@@ -110,16 +110,12 @@ fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
     let repo_root = repo::root()?;
     let user = User::of_host()?;
     debug!("host user: {user:?}");
-    let global_path = global_config_file()?;
-    match config::scaffold_global(&global_path) {
-        Ok(true) => info!(
-            "wrote the default global configuration to {}: edit it to taste",
-            global_path.display()
-        ),
-        Ok(false) => {}
-        Err(error) => warn!("no global configuration: {error:#}"),
-    }
-    let global_file = Some(global_path.clone()).filter(|file| file.is_file());
+    let global_dir = global_config_dir()?;
+    let global_path = global_dir.join(GLOBAL_CONFIG_FILES[0]);
+    let global_file = config::global_config_file(&global_dir).or_else(|| {
+        scaffold_global(&global_dir, &global_path);
+        Some(global_path.clone()).filter(|file| file.is_file())
+    });
     let repo_file = match config_file {
         Some(file) => Some(
             std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?,
@@ -161,14 +157,37 @@ fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
     })
 }
 
-/// `$XDG_CONFIG_HOME/viz-shell/global.yml`, or under `~/.config` without it.
-fn global_config_file() -> anyhow::Result<PathBuf> {
+/// `$XDG_CONFIG_HOME/viz-shell`, or `~/.config/viz-shell` without it.
+fn global_config_dir() -> anyhow::Result<PathBuf> {
     use etcetera::BaseStrategy;
     let strategy = etcetera::choose_base_strategy().context("finding your home folder")?;
-    Ok(strategy
-        .config_dir()
-        .join(GLOBAL_CONFIG_DIR)
-        .join(GLOBAL_CONFIG_FILE))
+    Ok(strategy.config_dir().join(GLOBAL_CONFIG_DIR))
+}
+
+/// A first run: writes the default global configuration to `path`, and the
+/// base Dockerfile it builds next to it, unless there. A failure leaves vz
+/// without a global configuration, never stopped.
+fn scaffold_global(dir: &Path, path: &Path) {
+    match config::scaffold_global(path) {
+        Ok(true) => info!(
+            "wrote the default global configuration to {}: edit it to taste",
+            path.display()
+        ),
+        Ok(false) => return,
+        Err(error) => {
+            warn!("no global configuration: {error:#}");
+            return;
+        }
+    }
+    let dockerfile = dir.join(BASE_DOCKERFILE);
+    match config::scaffold_base_dockerfile(&dockerfile) {
+        Ok(true) => info!(
+            "wrote the base image's Dockerfile to {}",
+            dockerfile.display()
+        ),
+        Ok(false) => {}
+        Err(error) => warn!("no base Dockerfile: {error:#}"),
+    }
 }
 
 /// Each profile: the files that define it, what it extends and changes;

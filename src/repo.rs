@@ -45,7 +45,9 @@ pub fn local_file_for(file: &Path) -> PathBuf {
     file.with_file_name(name)
 }
 
-fn first_present(root: &Path, names: &[&str]) -> Option<PathBuf> {
+/// The first of `names` present in `root`; others present are ignored,
+/// with a warning.
+pub fn first_present(root: &Path, names: &[&str]) -> Option<PathBuf> {
     let present: Vec<&str> = names
         .iter()
         .copied()

@@ -76,14 +76,15 @@ In any git repository, name an image, then run `vz`:
 image: rust:1.98.1-slim-trixie
 ```
 
-The first run also writes `~/.config/viz-shell/global.yml`: your defaults for every repository, with
-a `trusted` profile that grants sudo, docker and the host's network when you ask for it.
+The first run also writes `~/.config/viz-shell/viz-shell.global.yml`: your defaults for every
+repository, with a `trusted` profile that grants sudo, docker and the host's network when you ask for
+it, and the base image's Dockerfile beside it.
 
 A fuller configuration:
 
 ```yaml
 image:
-  dockerfile: Dockerfile               # FROM ghcr.io/jan-blomquist/viz-shell-base:2026.9.2
+  dockerfile: Dockerfile               # ARG BASE: stacks on the global configuration's base
 shell: fish
 state:                                 # survives the container, kept in .vz_state/
   - /usr/local/cargo/registry
@@ -176,14 +177,14 @@ Version: 0.1.0
 Session: new, ephemeral
 Repo: ~/repos/app
 Branch: main
-Config: global.yml, viz-shell.yml, viz-shell.local.yml
+Config: viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml
 Profile: trusted
-Image: vz-app:3f9c2a1b7d4e8f60
+Image: vz-app:3f9c2a1b7d4e8f60 (on vz-viz-shell:9a1c0d2e5b7f3a41)
 Shell: fish
 Sudo: yes
 Docker: /run/user/1000/docker.sock
 Network: host
-Mounts: 4 (2 global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)
+Mounts: 4 (2 viz-shell.global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)
 State: 2 paths in ~/repos/app/.vz_state
 Env: 3 variables
 Hooks: 2 create, 1 attach
@@ -210,7 +211,7 @@ Unknown keys in `vz.yml` are refused, naming the line.
 | File | Owner | Checked in | Says |
 |---|---|---|---|
 | `viz-shell.yml` | the repository | yes | the portable dev environment: image, state, shell, hooks, share, privileges, `env` with its `.env` files and passthrough names |
-| `global.yml` | you, everywhere | no | your tools, mounts, credentials, banner, shell preference |
+| `viz-shell.global.yml` | you, everywhere | no | your tools, mounts, credentials, banner, shell preference |
 | `viz-shell.local.yml` | you, in this repository | no | mounts and values only this checkout needs |
 
 The portability test for the repository file: no host path outside the repository, except `state`,
@@ -265,9 +266,8 @@ image:                        # build; paths relative to the vz.yml's folder
   Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
 - Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
   so `.dockerignore` applies.
-- This repository's `Dockerfile`: `viz-shell-base` (below), plus the Rust toolchain, fish as its
-  shell, and `vz` built from the checkout. Run `just build-base-images` once before its first
-  `vz`.
+- This repository's `Dockerfile`: the Rust toolchain, fish as its shell, and `vz` built from the
+  checkout, stacked on the base (below); alone, on pinned Debian, with what the base adds.
 
 **Stacking.** A Dockerfile that declares `ARG BASE` (`ARG BASE=<default>`, then `FROM ${BASE}`, as
 below) is built on the image the earlier layers resolved to: vz pulls or builds that one first, then
@@ -287,24 +287,23 @@ meet the contract. For your own images:
 - no reliance on an `ENTRYPOINT` (vz runs its own) or on a baked user (vz adds you);
 - `sudo`, if a profile grants `privileges.sudo`.
 
-**Base image.** [`images/`](images) holds an image to start from, pinned to exact versions.
-The `images` workflow publishes it to ghcr on every version bump; `just build-base-images` builds
-the same image locally, under its published name, where a `FROM` finds it:
-
-| Image | Adds |
-|---|---|
-| `ghcr.io/jan-blomquist/viz-shell-base:2026.9.2` | what vz's features need: sudo, the docker CLI, locales, ca-certificates; nothing else |
+**Base image.** The first run writes `viz-shell.base.Dockerfile` next to the global configuration
+([`templates/viz-shell.base.Dockerfile`](templates/viz-shell.base.Dockerfile), embedded in the
+binary), and the global configuration's `image:` builds it, locally, on first use, as
+`vz-viz-shell:<hash>`. It holds what vz's features need: sudo, the docker CLI, locales,
+ca-certificates; nothing else. Edit it, or replace it in the global configuration with a Dockerfile
+of your own or an image reference.
 
 **How the image is built.** apt when Debian's version will do. Otherwise the vendor's release,
 downloaded from its URL and verified by sha256, or, for a static binary whose vendor publishes an
 image as the way to get it, `COPY --from` that image. Every `FROM` is pinned by digest and every
 download checksummed.
 
-A repository starts from it and adds what it needs; vz knows nothing of it:
+A repository stacks on it and adds what it needs:
 
 ```dockerfile
-# The image this one starts from; a user may supply another with the same contract.
-ARG BASE=ghcr.io/jan-blomquist/viz-shell-base:2026.9.2
+# The image this one starts from: the global configuration's, else the default.
+ARG BASE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 FROM ${BASE}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git fish \
@@ -313,7 +312,7 @@ RUN apt-get update \
 
 An opinionated everyday image, with agents, shells and tools, is a repository of your own, built the
 same way; the global configuration's `image: { dockerfile: ... }` can point at a personal Dockerfile
-next to `global.yml`, for repositories without their own.
+next to `viz-shell.global.yml`, for repositories without their own.
 
 Pin a version, never a moving tag: a new base is then an edit to the `FROM`, which changes the
 image's hash, so the repository rebuilds on that branch, and only there.
@@ -560,11 +559,15 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 
 ## Global configuration
 
-`~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
-configuration, and every repository starts from it. The first `vz` writes it from its built-in
-default ([`templates/global.yml`](templates/global.yml), embedded in the binary) when there is
-none, and never overwrites it: an untrusted default with the banner on, and a `trusted` profile
-with sudo, docker, the host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
+`~/.config/viz-shell/viz-shell.global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a
+repository's configuration, and every repository starts from it. The first `vz` writes it from its
+built-in default ([`templates/viz-shell.global.yml`](templates/viz-shell.global.yml), embedded in
+the binary) when there is none, and never overwrites it: the [base image](#images) built from
+`viz-shell.base.Dockerfile` beside it, the banner on, and a `trusted` profile with sudo, docker, the
+host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
+
+- The first of `viz-shell.global.yml`, `viz-shell.global.yaml`, `vz.global.yml`, `vz.global.yaml`.
+  A `global.yml`, the former name, is still read when none of them exists.
 
 - A repository without a configuration runs from the global one alone.
 - Layers, later wins: global root, repository root, [local](#local-configuration) root, then for the
@@ -578,7 +581,8 @@ with sudo, docker, the host's network, `~/.ssh` and trusted-only secrets. Edit i
 
 - A profile is a mode: each file says what it adds in it. A repository's `trusted:` adds to the global
   `trusted`, and any profile can `extends: trusted`. A chosen profile beats both roots.
-- Relative paths belong to their file: `trusted.env` in `global.yml` is `~/.config/viz-shell/trusted.env`.
+- Relative paths belong to their file: `trusted.env` in `viz-shell.global.yml` is
+  `~/.config/viz-shell/trusted.env`.
   Every path is made absolute when read, so a repository removes a global entry however it writes it.
 - `vz profiles` lists each profile and the files that define it; `--show-effective-config` and
   `--show-env` name the files read and the layers applied.
@@ -628,7 +632,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
 | [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight, the `TERM` fallback |
-| [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets |
+| [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets, the former name `global.yml` |
 | [`local`](examples/local) | a local overlay over the repository's file: a value, a mount's mode, an added mount, a profile, a profile of its own; the warning when it is tracked |
 | [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in a profile; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
@@ -650,7 +654,6 @@ VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, o
 ```sh
 just build                # → target/x86_64-unknown-linux-musl/release/viz-shell
 just install              # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
-just build-base-images    # → the base image in images/, built locally
 ```
 
 Rust 1.98.1 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,

@@ -4,7 +4,11 @@
 # Relative paths here are relative to this folder.
 
 # The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
-image: debian:stable-slim
+# The base image, built locally on first use from the Dockerfile next to this
+# file. Replace it with your own Dockerfile or an image reference; a repository
+# Dockerfile that declares `ARG BASE` stacks on it.
+image:
+  dockerfile: viz-shell.base.Dockerfile
 
 # A banner above an interactive shell, like fastfetch: the repository, branch,
 # profile, image, shell, and what the shell shares and may do. Never above

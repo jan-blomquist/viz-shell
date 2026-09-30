@@ -1,5 +1,5 @@
 # A global configuration, as this example's test writes it into its throwaway
-# home: ~/.config/viz-shell/global.yml. Relative paths are relative to it.
+# home: ~/.config/viz-shell/viz-shell.global.yml. Relative paths are relative to it.
 image: debian:stable-slim
 
 env:

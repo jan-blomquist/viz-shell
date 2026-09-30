@@ -19,7 +19,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_TAG, HOME_PREFIX};
+use tracing::info;
+
+use crate::constants::{
+    DEFAULT_BUILD_CONTEXT, DEFAULT_MOUNT_MODE, DEFAULT_TAG, GLOBAL_CONFIG_FILES, HOME_PREFIX,
+    LEGACY_GLOBAL_CONFIG_FILE,
+};
 
 /// The configuration files in effect, each optional, checked: every
 /// `extends` names a profile of any file, and none forms a cycle.
@@ -1251,20 +1256,50 @@ impl EffectiveConfig {
     }
 }
 
-/// The global configuration a first run writes to `~/.config/viz-shell/global.yml`:
-/// `templates/global.yml`, embedded at build time.
-pub const DEFAULT_GLOBAL: &str = include_str!("../templates/global.yml");
+/// The global configuration a first run writes to
+/// `~/.config/viz-shell/viz-shell.global.yml`: `templates/viz-shell.global.yml`,
+/// embedded at build time.
+pub const DEFAULT_GLOBAL: &str = include_str!("../templates/viz-shell.global.yml");
+
+/// The base image's Dockerfile a first run writes next to the global
+/// configuration, which builds it: `templates/viz-shell.base.Dockerfile`.
+pub const DEFAULT_BASE_DOCKERFILE: &str = include_str!("../templates/viz-shell.base.Dockerfile");
+
+/// The global configuration in its folder: the first of
+/// `GLOBAL_CONFIG_FILES` present, else a `global.yml` by its former name.
+pub fn global_config_file(dir: &Path) -> Option<PathBuf> {
+    crate::repo::first_present(dir, &GLOBAL_CONFIG_FILES).or_else(|| {
+        let legacy = dir.join(LEGACY_GLOBAL_CONFIG_FILE);
+        legacy.is_file().then(|| {
+            info!(
+                "reading {LEGACY_GLOBAL_CONFIG_FILE}; the name is {} now",
+                GLOBAL_CONFIG_FILES[0]
+            );
+            legacy
+        })
+    })
+}
 
 /// Writes the default global configuration when there is none; never
 /// overwrites. Returns whether it wrote.
 pub fn scaffold_global(path: &Path) -> anyhow::Result<bool> {
+    scaffold(path, DEFAULT_GLOBAL)
+}
+
+/// Writes the default base Dockerfile when there is none; never overwrites.
+/// Returns whether it wrote.
+pub fn scaffold_base_dockerfile(path: &Path) -> anyhow::Result<bool> {
+    scaffold(path, DEFAULT_BASE_DOCKERFILE)
+}
+
+fn scaffold(path: &Path, content: &str) -> anyhow::Result<bool> {
     if path.exists() {
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    std::fs::write(path, DEFAULT_GLOBAL).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
 }
 
@@ -2320,27 +2355,96 @@ mounts:
         }
     }
 
+    type Scaffold = fn(&Path) -> anyhow::Result<bool>;
+
     #[test]
-    fn scaffold_global__missing__writes_the_template() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(".config/viz-shell/global.yml");
+    fn scaffold__missing__writes_the_template() {
+        let cases: [(&str, Scaffold, &str); 2] = [
+            ("viz-shell.global.yml", scaffold_global, DEFAULT_GLOBAL),
+            (
+                "viz-shell.base.Dockerfile",
+                scaffold_base_dockerfile,
+                DEFAULT_BASE_DOCKERFILE,
+            ),
+        ];
+        for (name, scaffold, template) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join(".config/viz-shell").join(name);
 
-        let wrote = scaffold_global(&path).unwrap();
+            let wrote = scaffold(&path).unwrap();
 
-        assert!(wrote);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_GLOBAL);
+            assert!(wrote, "{name}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), template, "{name}");
+        }
     }
 
     #[test]
-    fn scaffold_global__present__kept_as_it_is() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join("global.yml");
-        std::fs::write(&path, "image: mine\n").unwrap();
+    fn scaffold__present__kept_as_it_is() {
+        let cases: [(&str, Scaffold); 2] = [
+            ("viz-shell.global.yml", scaffold_global),
+            ("viz-shell.base.Dockerfile", scaffold_base_dockerfile),
+        ];
+        for (name, scaffold) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join(name);
+            std::fs::write(&path, "mine\n").unwrap();
 
-        let wrote = scaffold_global(&path).unwrap();
+            let wrote = scaffold(&path).unwrap();
 
-        assert!(!wrote);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "image: mine\n");
+            assert!(!wrote, "{name}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine\n", "{name}");
+        }
+    }
+
+    #[test]
+    fn global_config_file__names_precedence_and_the_former_name() {
+        let cases: [(&[&str], Option<&str>); 8] = [
+            (&["viz-shell.global.yml"], Some("viz-shell.global.yml")),
+            (&["viz-shell.global.yaml"], Some("viz-shell.global.yaml")),
+            (&["vz.global.yml"], Some("vz.global.yml")),
+            (&["vz.global.yaml"], Some("vz.global.yaml")),
+            (&["global.yml"], Some("global.yml")),
+            (&["global.yml", "vz.global.yaml"], Some("vz.global.yaml")),
+            (
+                &["vz.global.yml", "viz-shell.global.yaml", "global.yml"],
+                Some("viz-shell.global.yaml"),
+            ),
+            (&["global.yaml", "viz-shell.yml"], None),
+        ];
+        for (files, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            for file in files {
+                std::fs::write(dir.path().join(file), "{}\n").unwrap();
+            }
+
+            let chosen = global_config_file(dir.path());
+
+            assert_eq!(
+                chosen,
+                expected.map(|name| dir.path().join(name)),
+                "{files:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_global__image__the_base_dockerfile_written_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viz-shell.global.yml");
+        scaffold_global(&path).unwrap();
+        scaffold_base_dockerfile(&dir.path().join("viz-shell.base.Dockerfile")).unwrap();
+
+        let layer = Layer::load(&path, Path::new(SALLY), Path::new(APP)).unwrap();
+
+        let config = Config::new(Some(layer), None, None).unwrap();
+        let ImageSource::Build(spec) = config.effective(None).unwrap().image().clone() else {
+            panic!("the default global configuration builds its image");
+        };
+        assert_eq!(
+            spec.dockerfile,
+            dir.path().join("viz-shell.base.Dockerfile")
+        );
+        assert!(spec.dockerfile.is_file());
     }
 
     #[test]
@@ -2382,7 +2486,8 @@ mounts:
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let home = Path::new("/home/sally");
         let default_global = tempfile::tempdir().unwrap();
-        std::fs::write(default_global.path().join("global.yml"), DEFAULT_GLOBAL).unwrap();
+        scaffold_global(&default_global.path().join("viz-shell.global.yml")).unwrap();
+        scaffold_base_dockerfile(&default_global.path().join("viz-shell.base.Dockerfile")).unwrap();
         let examples = std::fs::read_dir(root.join("examples")).unwrap();
         let dirs: Vec<PathBuf> = examples
             .map(|entry| entry.unwrap().path())
@@ -2394,7 +2499,7 @@ mounts:
                 file.map(|file| Layer::load(&file, home, root).unwrap_or_else(|e| panic!("{e:#}")))
             };
             // The repository file by the same precedence vz uses.
-            let global_file = Some(dir.join("global.yml")).filter(|file| file.is_file());
+            let global_file = global_config_file(&dir);
             let (global, repo) = (read(global_file), read(crate::repo::config_file(&dir)));
             if global.is_none() && repo.is_none() {
                 continue;

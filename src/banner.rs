@@ -233,7 +233,7 @@ mod tests {
     /// A configuration file of the kind, under a typical name.
     fn file(kind: ConfigFile) -> (ConfigFile, &'static Path) {
         let path = match kind {
-            ConfigFile::Global => "/home/sally/.config/viz-shell/global.yml",
+            ConfigFile::Global => "/home/sally/.config/viz-shell/viz-shell.global.yml",
             ConfigFile::Repository => "/home/sally/repos/app/viz-shell.yml",
             ConfigFile::Local => "/home/sally/repos/app/viz-shell.local.yml",
         };
@@ -260,14 +260,14 @@ mod tests {
             ("Session", "new, ephemeral"),
             ("Repo", "~/repos/app"),
             ("Branch", "main"),
-            ("Config", "global.yml, viz-shell.yml"),
+            ("Config", "viz-shell.global.yml, viz-shell.yml"),
             ("Profile", "trusted"),
             ("Image", "vz-app:0123456789abcdef"),
             ("Shell", "fish"),
             ("Sudo", "yes"),
             ("Docker", "/run/user/1000/docker.sock"),
             ("Network", "bridge"),
-            ("Mounts", "3 (1 global.yml, 2 viz-shell.yml)"),
+            ("Mounts", "3 (1 viz-shell.global.yml, 2 viz-shell.yml)"),
             ("State", "2 paths in ~/repos/app/.vz_state"),
             ("Env", "1 variable"),
             ("Hooks", "2 create, 1 attach"),
@@ -410,7 +410,12 @@ mod tests {
     fn facts__config_and_mounts__named_by_the_file_that_set_them() {
         use ConfigFile::{Global, Local, Repository};
         let cases: [(&[ConfigFile], &[ConfigFile], &str, &str); 6] = [
-            (&[Global], &[Global], "global.yml", "1 (global.yml)"),
+            (
+                &[Global],
+                &[Global],
+                "viz-shell.global.yml",
+                "1 (viz-shell.global.yml)",
+            ),
             (
                 &[Repository],
                 &[Repository],
@@ -420,7 +425,7 @@ mod tests {
             (
                 &[Global, Repository],
                 &[Repository, Repository],
-                "global.yml, viz-shell.yml",
+                "viz-shell.global.yml, viz-shell.yml",
                 "2 (viz-shell.yml)",
             ),
             (
@@ -432,14 +437,14 @@ mod tests {
             (
                 &[Global, Repository, Local],
                 &[Global, Local],
-                "global.yml, viz-shell.yml, viz-shell.local.yml",
-                "2 (1 global.yml, 1 viz-shell.local.yml)",
+                "viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml",
+                "2 (1 viz-shell.global.yml, 1 viz-shell.local.yml)",
             ),
             (
                 &[Global, Repository, Local],
                 &[Global, Repository, Local],
-                "global.yml, viz-shell.yml, viz-shell.local.yml",
-                "3 (1 global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)",
+                "viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml",
+                "3 (1 viz-shell.global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)",
             ),
         ];
         for (files, mounted_by, expected_config, expected_mounts) in cases {

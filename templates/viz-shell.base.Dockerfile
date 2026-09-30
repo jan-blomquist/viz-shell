@@ -1,8 +1,15 @@
 # syntax=docker/dockerfile:1
-# viz-shell-base: what vz's features need to work, and nothing decided for
-# you; a start for your own image. sudo for `privileges.sudo`, the docker CLI
-# for `share.docker`, en_US.UTF-8 for the host's LANG, CA certificates. No
-# tools, no language toolchain, no user: vz adds you at start.
+# The base every repository starts from unless it says otherwise. vz wrote it
+# next to the global configuration on its first run and never overwrites it;
+# the global configuration's `image:` builds it locally, as
+# `vz-viz-shell:<hash>`. Edit it to taste, or name a Dockerfile of your own in
+# the global configuration instead. A repository Dockerfile that declares
+# `ARG BASE` stacks on it.
+#
+# What vz's features need to work, and nothing decided for you: sudo for
+# `privileges.sudo`, the docker CLI for `share.docker`, en_US.UTF-8 for the
+# host's LANG, CA certificates. No tools, no language toolchain, no user: vz
+# adds you at start.
 #
 # Tools live under /usr/local, never in a home: the image serves every user,
 # and `state` mounts in the home cannot shadow them.
@@ -15,7 +22,7 @@ FROM docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5
 
 FROM debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 LABEL org.opencontainers.image.source="https://github.com/jan-blomquist/viz-shell" \
-      org.opencontainers.image.description="viz-shell-base: what vz's features need, nothing else" \
+      org.opencontainers.image.description="viz-shell base: what vz's features need, nothing else" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 ARG DEBIAN_FRONTEND=noninteractive
