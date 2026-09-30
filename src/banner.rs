@@ -49,6 +49,8 @@ pub struct Session<'a> {
     pub state_dir: &'a Path,
     /// How many variables the configured environment sets; never their names.
     pub env_vars: usize,
+    pub create_hooks: usize,
+    pub attach_hooks: usize,
 }
 
 /// The title, `user@container`: the prompt's `user@hostname`.
@@ -103,6 +105,14 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         1 => "1 variable".to_owned(),
         vars => format!("{vars} variables"),
     };
+    let hook_counts: Vec<String> = [
+        (session.create_hooks, "create"),
+        (session.attach_hooks, "attach"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, kind)| format!("{count} {kind}"))
+    .collect();
     let how = if session.attached { "attached" } else { "new" };
     let lifetime = if session.persistent {
         "persistent"
@@ -148,6 +158,7 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         ("Mounts", mounts),
         ("State", state),
         ("Env", env),
+        ("Hooks", or_none(hook_counts.join(", "))),
     ]);
     facts
 }
@@ -200,6 +211,8 @@ mod tests {
             state_paths: 2,
             state_dir: Path::new("/home/sally/repos/app/.vz_state"),
             env_vars: 1,
+            create_hooks: 2,
+            attach_hooks: 1,
         }
     }
 
@@ -246,6 +259,7 @@ mod tests {
             ("Mounts", "3 (1 global.yml, 2 viz-shell.yml)"),
             ("State", "2 paths in ~/repos/app/.vz_state"),
             ("Env", "1 variable"),
+            ("Hooks", "2 create, 1 attach"),
         ];
         let facts: Vec<(&str, &str)> = facts.iter().map(|(k, v)| (*k, v.as_str())).collect();
         assert_eq!(facts, expected);
@@ -261,6 +275,8 @@ mod tests {
             docker: None,
             state_paths: 0,
             env_vars: 0,
+            create_hooks: 0,
+            attach_hooks: 0,
             ..session(&[], &[])
         };
 
@@ -282,6 +298,7 @@ mod tests {
             ("Mounts", "none"),
             ("State", "none"),
             ("Env", "none"),
+            ("Hooks", "none"),
         ];
         for (key, expected) in expected {
             assert_eq!(value(key), Some(expected), "{key}");
@@ -309,6 +326,31 @@ mod tests {
             assert_eq!(
                 value, expected,
                 "attached {attached}, persistent {persistent}"
+            );
+        }
+    }
+
+    #[test]
+    fn facts__hooks__counts_of_the_kinds_set() {
+        let cases = [
+            (0, 0, "none"),
+            (2, 0, "2 create"),
+            (0, 1, "1 attach"),
+            (2, 1, "2 create, 1 attach"),
+        ];
+        for (create_hooks, attach_hooks, expected) in cases {
+            let session = Session {
+                create_hooks,
+                attach_hooks,
+                ..session(&[], &[])
+            };
+
+            let facts = facts(&session);
+
+            let (_, value) = facts.iter().find(|(key, _)| *key == "Hooks").unwrap();
+            assert_eq!(
+                value, expected,
+                "create {create_hooks}, attach {attach_hooks}"
             );
         }
     }

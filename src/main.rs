@@ -28,8 +28,8 @@ use crate::config::{Config, ImageSource, Layer};
 use crate::constants::{
     CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
     ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
-    HOME_ENV, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV, REPO_CONFIG_FILES, SHELL_ENV, SUDO_ENV,
-    UID_ENV, USER_ENV,
+    HOME_ENV, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV,
+    REPO_CONFIG_FILES, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
         // which wants a single-threaded process.
         Some(Action::Entrypoint { hold, command }) => entrypoint::run(command, *hold),
         Some(Action::Enter { command }) => entrypoint::enter(command),
+        Some(Action::AsUser { command }) => entrypoint::as_user(command),
         Some(Action::Profiles) => print_profiles(&load_with(cli.config_file.as_deref())?),
         Some(Action::Ls { all }) => runtime()?.block_on(list(*all)),
         Some(Action::Kill { targets, all }) => runtime()?.block_on(kill(targets, *all)),
@@ -339,6 +340,8 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
             state_paths: state.len(),
             state_dir: &state_dir,
             env_vars: environment.len(),
+            create_hooks: config.hooks.create.len(),
+            attach_hooks: config.hooks.attach.len(),
         };
         anstream::print!(
             "{}",
@@ -411,6 +414,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
             sudo: config.privileges.sudo,
             host_network: config.share.host_network,
             shell: config.shell.as_deref(),
+            hooks: &config.hooks,
         };
         match engine.create(session.create_args(), &values).await? {
             Created::Yes => break name,
@@ -516,6 +520,9 @@ fn reserved_env_names() -> Vec<&'static str> {
         SHELL_ENV,
         CONTAINER_ENV,
         CONTAINER_PROFILE_ENV,
+        HOOKS_CREATE_ENV,
+        HOOKS_ATTACH_ENV,
+        REPO_ENV,
     ]
     .into_iter()
     .chain(PASSTHROUGH_ENV)
@@ -578,4 +585,19 @@ fn init_tracing() {
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)] // unit__scenario__expected test names
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reserved_env_names__hooks_and_repo__included() {
+        let reserved = reserved_env_names();
+
+        for name in ["VZ_HOOKS_CREATE", "VZ_HOOKS_ATTACH", "VZ_REPO"] {
+            assert!(reserved.contains(&name), "{name}: {reserved:?}");
+        }
+    }
 }

@@ -119,6 +119,7 @@ profiles:
 - [Share](#share)
 - [Privileges](#privileges)
 - [Environment](#environment)
+- [Hooks](#hooks)
 - [Profiles](#profiles)
 - [Global configuration](#global-configuration)
 - [Examples](#examples)
@@ -143,16 +144,17 @@ vz kill 0 api       # removes containers; --all for all of this repository's
 
 `vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
 `viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file. It pulls or
-builds the image if missing, and runs a container, removed on exit unless `persistent`; `vz` exits
-with the shell's, or the command's, exit code. Inside:
+builds the image if missing, and runs a container, removed on exit unless `persistent`, with its
+[hooks](#hooks): `create` once, `attach` before every shell or command. `vz` exits with the shell's,
+or the command's, exit code. Inside:
 
 - the repository is mounted read-write at its host path; the working directory is yours;
 - you are you: same user, uid, group and home, so `whoami`, `~` and ssh work as on the host;
 - `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set. A `TERM` the image has no
   description for, as slim images lack those of newer terminals like ghostty, kitty or wezterm,
   becomes `xterm-256color`, so tmux, less and htop still work;
-- `VZ_CONTAINER` names the container, and `VZ_CONTAINER_PROFILE` its profile, when one: for prompts,
-  scripts and agents that want to know where they run.
+- `VZ_CONTAINER` names the container, `VZ_CONTAINER_PROFILE` its profile, when one, and `VZ_REPO`
+  the repository root: for prompts, scripts and agents that want to know where they run.
 
 `banner: true` prints a banner above an interactive shell (never above `vz -- command`), in the
 manner of fastfetch: what the shell is about to be. Colored on a terminal, unless `NO_COLOR` is set.
@@ -181,6 +183,7 @@ Network: host
 Mounts: 3 (2 global.yml, 1 viz-shell.yml)
 State: 2 paths in ~/repos/app/.vz_state
 Env: 3 variables
+Hooks: 2 create, 1 attach
 ```
 
 The default global configuration turns it on; `banner: false` in a repository or profile turns it off.
@@ -457,6 +460,33 @@ vz --show-env                   # every name and where it comes from, never a va
 - `vz` sets `HOME`, `VZ_*`, `TERM`, `COLORTERM`, `LANG` and, when docker is shared, `DOCKER_HOST` itself;
   the environment cannot change those.
 
+## Hooks
+
+Commands run inside the container before you enter it:
+
+```yaml
+hooks:
+  create:                      # once per container, on its first entry
+    - npm ci
+    - { run: "fish -c 'set -U fish_greeting'", enabled: false }
+  attach:                      # before every entry: each shell, and `vz -- command`
+    - git fetch --quiet
+```
+
+- Run as you, in the repository root (`$VZ_REPO`), through `sh -c`, with the session's environment;
+  each list in order. Output goes to the terminal of the entry that runs them.
+- `create` runs once per container, on its first entry; a stop and start doesn't run it again. An
+  ephemeral container runs it on every `vz`: keep hooks idempotent and fast.
+- `attach` runs before every entry: the first shell, each `vz attach`, and `vz -- command`.
+- A failing hook fails the entry, naming it and its exit status. A failed `create` runs again on the
+  next entry.
+- Entries arriving while `create` runs wait for it.
+- Keyed by the command: a profile adds one, replaces one by the same command, or removes one with
+  `enabled: false`. An empty command is refused.
+- Another shell's syntax goes through it: `fish -c '...'`.
+
+To seed a config file once, a `state` file with `init:` needs no hook.
+
 ## Profiles
 
 Named layers on top of the root of `vz.yml`, keyed by name, each with the same keys. Choose one with
@@ -479,8 +509,9 @@ profiles:
 Every collection is a list, merged the same way: root, then the `extends` chain, then the profile.
 
 - An entry is a bare path or name for the common case, or expanded for anything else.
-- An entry with the same key (a path; a name for passthrough) updates the earlier one in its place;
-  a new one comes last. `enabled: false` removes one. A key twice in one list is refused.
+- An entry with the same key (a path; a name for passthrough; the command for hooks) updates the
+  earlier one in its place; a new one comes last. `enabled: false` removes one. A key twice in one
+  list is refused.
 - Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`) are replaced; `share` and
   `privileges` per key, `env.defaults` per variable name.
 - The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
@@ -537,6 +568,7 @@ Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in
 | [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |
 | [`sessions`](examples/sessions) | named containers, `VZ_CONTAINER`, persistent ones, attach by index, name or `attach: true`, kill |
+| [`hooks`](examples/hooks) | `create` once per container, across a stop and start, and `attach` per entry, in order, in the repository root; one removed in a profile; a failing hook |
 
 ## Logging
 

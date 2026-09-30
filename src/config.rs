@@ -100,6 +100,9 @@ pub struct Layer {
     /// Host paths shown at the same path inside.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<MountItem>,
+    /// Commands run inside, as the user, in the repository.
+    #[serde(default, skip_serializing_if = "Hooks::is_unset")]
+    pub hooks: Hooks,
     /// Root only, keyed by profile name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Layer>,
@@ -333,6 +336,67 @@ impl Keyed for PassthroughItem {
     }
 }
 
+/// Commands run through `sh -c`, each list in order, keyed by the command.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hooks {
+    /// Once per container, on its first entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub create: Vec<HookItem>,
+    /// Before every entry: each shell, and `vz -- command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attach: Vec<HookItem>,
+}
+
+impl Hooks {
+    fn is_unset(&self) -> bool {
+        *self == Hooks::default()
+    }
+
+    fn merge(&self, over: &Hooks) -> Hooks {
+        Hooks {
+            create: merge_keyed(&self.create, &over.create),
+            attach: merge_keyed(&self.attach, &over.attach),
+        }
+    }
+}
+
+/// A hook: a bare command, or expanded.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum HookItem {
+    Command(String),
+    Full(HookSpec),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookSpec {
+    pub run: String,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+impl Keyed for HookItem {
+    fn key(&self) -> &str {
+        match self {
+            HookItem::Command(command) => command,
+            HookItem::Full(spec) => &spec.run,
+        }
+    }
+
+    fn key_mut(&mut self) -> &mut String {
+        match self {
+            HookItem::Command(key) => key,
+            HookItem::Full(spec) => &mut spec.run,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !matches!(self, HookItem::Full(spec) if !spec.enabled)
+    }
+}
+
 /// Where the image comes from: a reference to pull, or a Dockerfile to build.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -546,6 +610,14 @@ pub struct EffectiveConfig {
     pub env: EffectiveEnv,
     pub state: Vec<StateEntry>,
     pub mounts: Vec<MountEntry>,
+    pub hooks: EffectiveHooks,
+}
+
+/// The hooks' commands, in order, without removed ones.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EffectiveHooks {
+    pub create: Vec<String>,
+    pub attach: Vec<String>,
 }
 
 /// What the shell shares with the host.
@@ -818,6 +890,8 @@ impl Layer {
             count(self.env.defaults.len(), "env default"),
             count(self.env.files.len(), "env file"),
             count(self.env.passthrough.len(), "passthrough"),
+            count(self.hooks.create.len(), "create hook"),
+            count(self.hooks.attach.len(), "attach hook"),
             switch(self.banner, "banner"),
             switch(self.persistent, "persistent"),
             switch(self.attach, "attach"),
@@ -843,6 +917,7 @@ impl Layer {
             env: self.env.merge(&over.env),
             state: merge_keyed(&self.state, &over.state),
             mounts: merge_keyed(&self.mounts, &over.mounts),
+            hooks: self.hooks.merge(&over.hooks),
             profiles: BTreeMap::new(),
         }
     }
@@ -895,6 +970,15 @@ impl Layer {
         check_unique(&self.env.files, "env file")?;
         for entry in &self.env.files {
             ensure!(!entry.key().is_empty(), "env file path is empty");
+        }
+        for (kind, hooks) in [
+            ("create", &self.hooks.create),
+            ("attach", &self.hooks.attach),
+        ] {
+            check_unique(hooks, &format!("{kind} hook"))?;
+            for entry in hooks {
+                ensure!(!entry.key().trim().is_empty(), "{kind} hook is empty");
+            }
         }
         Ok(())
     }
@@ -984,6 +1068,7 @@ impl EffectiveConfig {
             env: EffectiveEnv::resolve(layer.env),
             state,
             mounts,
+            hooks: EffectiveHooks::resolve(&layer.hooks),
         })
     }
 }
@@ -1045,6 +1130,30 @@ impl EffectiveEnv {
     }
 }
 
+impl EffectiveHooks {
+    fn resolve(hooks: &Hooks) -> Self {
+        let commands = |items: &[HookItem]| {
+            items
+                .iter()
+                .filter(|entry| entry.enabled())
+                .map(|entry| entry.key().to_owned())
+                .collect()
+        };
+        Self {
+            create: commands(&hooks.create),
+            attach: commands(&hooks.attach),
+        }
+    }
+
+    fn to_hooks(&self) -> Hooks {
+        let items = |commands: &[String]| commands.iter().cloned().map(HookItem::Command).collect();
+        Hooks {
+            create: items(&self.create),
+            attach: items(&self.attach),
+        }
+    }
+}
+
 impl EffectiveConfig {
     /// As a `vz.yml` without profiles: every entry in its shortest form that
     /// says the same, so it parses back to the same configuration.
@@ -1095,6 +1204,7 @@ impl EffectiveConfig {
             env: self.env.to_env(),
             state,
             mounts,
+            hooks: self.hooks.to_hooks(),
             ..Layer::default()
         }
     }
@@ -1362,6 +1472,7 @@ mounts:
             env: EffectiveEnv::default(),
             state: vec![state("~/scratch", StateKind::Dir, None)],
             mounts: vec![],
+            hooks: EffectiveHooks::default(),
         };
         assert_eq!(config, expected);
     }
@@ -1639,6 +1750,7 @@ profiles:
             ("state: [~/a, ~/a]", "state path `~/a`"),
             ("env:\n  files: [.env, .env]", "env file `.env`"),
             ("env:\n  passthrough: [A, A]", "env passthrough `A`"),
+            ("hooks:\n  attach: [ls, { run: ls }]", "attach hook `ls`"),
         ];
         for (text, expected) in cases {
             let message = error(&format!("image: debian\n{text}\n"));
@@ -1647,6 +1759,104 @@ profiles:
                 message.contains(expected) && message.contains("twice"),
                 "expected {expected}: {message}"
             );
+        }
+    }
+
+    const HOOKS: &str = "\
+image: debian
+hooks:
+  create:
+    - npm ci
+    - { run: \"fish -c 'set -U fish_greeting'\", enabled: false }
+    - make setup
+  attach:
+    - git fetch --quiet
+profiles:
+  offline:
+    hooks:
+      create:
+        - { run: npm ci, enabled: false }
+        - make setup
+        - cargo fetch
+      attach:
+        - { run: git fetch --quiet, enabled: false }
+";
+
+    fn hooks(create: &[&str], attach: &[&str]) -> EffectiveHooks {
+        let commands = |list: &[&str]| list.iter().map(|command| command.to_string()).collect();
+        EffectiveHooks {
+            create: commands(create),
+            attach: commands(attach),
+        }
+    }
+
+    #[test]
+    fn effective__hooks__both_forms_in_order_disabled_dropped() {
+        let cases = [
+            (
+                None,
+                hooks(&["npm ci", "make setup"], &["git fetch --quiet"]),
+            ),
+            // npm ci disabled, make setup updated in its place, cargo fetch appended.
+            (Some("offline"), hooks(&["make setup", "cargo fetch"], &[])),
+        ];
+        for (profile, expected) in cases {
+            let config = effective(HOOKS, profile);
+
+            assert_eq!(config.hooks, expected, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn parse__empty_hook__is_refused_naming_its_kind() {
+        let cases = [
+            ("hooks:\n  create: [\"\"]", "create hook is empty"),
+            (
+                "hooks:\n  attach: [{ run: \"  \" }]",
+                "attach hook is empty",
+            ),
+            (
+                "profiles:\n  ci:\n    hooks:\n      attach: [\" \"]",
+                "attach hook is empty",
+            ),
+        ];
+        for (text, expected) in cases {
+            let message = error(&format!("image: debian\n{text}\n"));
+
+            assert!(message.contains(expected), "expected {expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn to_yaml__hooks__bare_commands_that_parse_back() {
+        let config = effective(HOOKS, None);
+
+        let yaml = config.to_yaml().unwrap();
+
+        let reread = effective(&yaml, None).hooks;
+        assert_eq!(reread, config.hooks, "{yaml}");
+        assert!(
+            yaml.contains("- npm ci") && !yaml.contains("run:"),
+            "{yaml}"
+        );
+    }
+
+    #[test]
+    fn to_yaml__no_hooks__no_hooks_key() {
+        let all_disabled = "\
+image: debian
+hooks:
+  attach: [ls]
+profiles:
+  quiet:
+    hooks:
+      attach: [{ run: ls, enabled: false }]
+";
+        let cases = [("image: debian\n", None), (all_disabled, Some("quiet"))];
+        for (text, profile) in cases {
+            let yaml = effective(text, profile).to_yaml().unwrap();
+
+            assert!(!yaml.contains("hooks"), "{profile:?}: {yaml}");
         }
     }
 
@@ -1685,6 +1895,7 @@ profiles:
         let cases = [
             (format!("{BASE}share:\n  docker: true\n"), Some("writable")),
             (ENV.to_owned(), Some("ci")),
+            (HOOKS.to_owned(), None),
         ];
         for (text, profile) in cases {
             let config = effective(&text, profile);

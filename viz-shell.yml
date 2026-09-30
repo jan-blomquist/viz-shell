@@ -39,3 +39,7 @@ env:
     - .env
   passthrough:
     - GH_TOKEN
+
+hooks:
+  create:
+    - "fish -c 'set -U fish_greeting'"

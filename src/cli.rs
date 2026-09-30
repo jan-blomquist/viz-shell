@@ -91,6 +91,12 @@ pub enum Action {
         #[arg(last = true)]
         command: Vec<String>,
     },
+    /// Inside the container: a hook; become the host user and run it
+    #[command(hide = true)]
+    AsUser {
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[cfg(test)]
