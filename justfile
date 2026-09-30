@@ -3,10 +3,11 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 binary := "target/x86_64-unknown-linux-musl/release/viz-shell"
 bin_dir := env_var("HOME") / ".local/bin"
 
-# The base images in images/: where they will be published, and their version.
-# Bump the version with every change to them, and the FROM lines that name it.
+# The base image in images/: where it is published, and its version, from
+# images/VERSION. Bump it with every change to the image, and the lines that
+# name it; the images workflow publishes on changes under images/ only.
 images_registry := "ghcr.io/jan-blomquist"
-images_version := "2026.9.1"
+images_version := trim(read("images/VERSION"))
 
 default:
     @just --list
@@ -24,13 +25,14 @@ install:
     @echo "installed {{bin_dir}}/viz-shell, alias {{bin_dir}}/vz"
     @case ":$PATH:" in *":{{bin_dir}}:"*) ;; *) echo "note: {{bin_dir}} is not on PATH" >&2 ;; esac
 
-# viz-shell-base first, then viz-shell-agents from it. A Dockerfile's FROM finds
-# them without a pull.
-# Build the base images in images/ locally, under their published names.
+# Build the base image in images/ locally, under its published name, where a
+# Dockerfile's FROM finds it without a pull.
 build-base-images:
     docker build -t {{images_registry}}/viz-shell-base:{{images_version}} images/base
-    docker build -t {{images_registry}}/viz-shell-agents:{{images_version}} \
-        --build-arg BASE={{images_registry}}/viz-shell-base:{{images_version}} images/agents
+
+# Push the built base image to the registry, as the images workflow does.
+push-base-images:
+    docker push {{images_registry}}/viz-shell-base:{{images_version}}
 
 # Unit tests: no engine needed.
 test:

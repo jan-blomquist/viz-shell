@@ -83,7 +83,7 @@ A fuller configuration:
 
 ```yaml
 image:
-  dockerfile: Dockerfile               # FROM ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1
+  dockerfile: Dockerfile               # FROM ghcr.io/jan-blomquist/viz-shell-base:2026.9.2
 shell: fish
 state:                                 # survives the container, kept in .vz_state/
   - /usr/local/cargo/registry
@@ -249,8 +249,9 @@ image:                        # build; paths relative to the vz.yml's folder
   Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
 - Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
   so `.dockerignore` applies.
-- This repository's `Dockerfile`: `viz-shell-agents` (below), plus the Rust toolchain and `vz` built
-  from the checkout. Run `just build-base-images` once before its first `vz`.
+- This repository's `Dockerfile`: `viz-shell-base` (below), plus the Rust toolchain, fish as its
+  shell, and `vz` built from the checkout. Run `just build-base-images` once before its first
+  `vz`.
 
 **What an image needs.** Official images like `debian`, `alpine`, `rust`, `node` or `python` already
 meet the contract. For your own images:
@@ -261,21 +262,33 @@ meet the contract. For your own images:
 - no reliance on an `ENTRYPOINT` (vz runs its own) or on a baked user (vz adds you);
 - `sudo`, if a profile grants `privileges.sudo`.
 
-**Base images.** [`images/`](images) holds two images to start from, pinned to exact versions.
-They are not published yet: `just build-base-images` builds them locally, under the names they will
-be published as, where a `FROM` finds them:
+**Base image.** [`images/`](images) holds an image to start from, pinned to exact versions.
+The `images` workflow publishes it to ghcr on every version bump; `just build-base-images` builds
+the same image locally, under its published name, where a `FROM` finds it:
 
 | Image | Adds |
 |---|---|
-| `ghcr.io/jan-blomquist/viz-shell-base:2026.9.1` | Debian, git, ssh, fish, tmux, ripgrep, jq, sudo, the docker CLI, just |
-| `ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1` | the base, plus Node, uv and Python, and the coding agents Claude Code, opencode, codex, pi, openspec |
+| `ghcr.io/jan-blomquist/viz-shell-base:2026.9.2` | what vz's features need: sudo, the docker CLI, locales, ca-certificates; nothing else |
 
-A repository inherits one and adds what it needs; vz knows nothing of either:
+**How the image is built.** apt when Debian's version will do. Otherwise the vendor's release,
+downloaded from its URL and verified by sha256, or, for a static binary whose vendor publishes an
+image as the way to get it, `COPY --from` that image. Every `FROM` is pinned by digest and every
+download checksummed.
+
+A repository starts from it and adds what it needs; vz knows nothing of it:
 
 ```dockerfile
-FROM ghcr.io/jan-blomquist/viz-shell-agents:2026.9.1
-COPY --from=ghcr.io/getzola/zola:v0.22.1 /bin/zola /usr/local/bin/zola
+# The image this one starts from; a user may supply another with the same contract.
+ARG BASE=ghcr.io/jan-blomquist/viz-shell-base:2026.9.2
+FROM ${BASE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git fish \
+ && rm -rf /var/lib/apt/lists/*
 ```
+
+An opinionated everyday image, with agents, shells and tools, is a repository of your own, built the
+same way; the global configuration's `image: { dockerfile: ... }` can point at a personal Dockerfile
+next to `global.yml`, for repositories without their own.
 
 Pin a version, never a moving tag: a new base is then an edit to the `FROM`, which changes the
 image's hash, so the repository rebuilds on that branch, and only there.
@@ -585,7 +598,7 @@ VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, o
 ```sh
 just build                # → target/x86_64-unknown-linux-musl/release/viz-shell
 just install              # → ~/.local/bin/viz-shell, and the alias ~/.local/bin/vz
-just build-base-images    # → the images in images/, built locally
+just build-base-images    # → the base image in images/, built locally
 ```
 
 Rust 1.98.1 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,

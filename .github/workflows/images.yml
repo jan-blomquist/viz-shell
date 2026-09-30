@@ -1,0 +1,39 @@
+name: images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths: [images/**]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: echo "IMAGE=ghcr.io/jan-blomquist/viz-shell-base:$(cat images/VERSION)" >> "$GITHUB_ENV"
+
+      # The workflow's own token may write the repository's ghcr packages.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published version is immutable: a change to the images needs a new one.
+      # After login, so a private package is seen too.
+      - name: Refuse to overwrite
+        run: |
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "$IMAGE is published already: bump images/VERSION" >&2
+            exit 1
+          fi
+
+      # The same build as `just build-base-images`.
+      - run: docker build -t "$IMAGE" images/base
+      - run: docker push "$IMAGE"
