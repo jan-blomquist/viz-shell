@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 
 use docker_wrapper::{DockerCommand, ExecCommand, RunCommand};
 
+use crate::config::EffectiveHooks;
 use crate::constants::{
     CONTAINER_ENV, CONTAINER_PROFILE_ENV, CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES,
-    FLOOR_PIDS_LIMIT, HOST_ALIAS, NO_NEW_PRIVILEGES, SESSION_DIR, SHELL_ENV, SUDO_ENV,
+    FLOOR_PIDS_LIMIT, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, HOST_ALIAS, NO_NEW_PRIVILEGES, REPO_ENV,
+    SESSION_DIR, SHELL_ENV, SUDO_ENV,
 };
 use crate::mounts::HostMount;
 use crate::share::DockerSocket;
@@ -51,6 +53,8 @@ pub struct Session<'a> {
     pub host_network: bool,
     /// `shell`: the entrypoint looks it up in the image.
     pub shell: Option<&'a str>,
+    /// Run by the entrypoint, and by each `vz enter`.
+    pub hooks: &'a EffectiveHooks,
 }
 
 impl Session<'_> {
@@ -110,6 +114,16 @@ impl Session<'_> {
                 .security_opt(NO_NEW_PRIVILEGES)
                 .pids_limit(FLOOR_PIDS_LIMIT),
         };
+        for (name, commands) in [
+            (HOOKS_CREATE_ENV, &self.hooks.create),
+            (HOOKS_ATTACH_ENV, &self.hooks.attach),
+        ] {
+            if !commands.is_empty() {
+                let json = serde_json::to_string(commands).expect("a list of strings is JSON");
+                run = run.env(name, json);
+            }
+        }
+        run = run.env(REPO_ENV, self.repo_root.to_string_lossy());
         run = run.env(CONTAINER_ENV, self.name);
         if let Some(profile) = self.profile {
             run = run.env(CONTAINER_PROFILE_ENV, profile);
@@ -328,6 +342,7 @@ mod tests {
         let passthrough = [("TERM".to_owned(), "xterm-256color".to_owned())];
         let env_names = ["GH_TOKEN".to_owned()];
         let labels = [("vz.index".to_owned(), "0".to_owned())];
+        let hooks = EffectiveHooks::default();
         let mut session = Session {
             name: "vz-0-vz",
             profile: None,
@@ -348,6 +363,7 @@ mod tests {
             sudo,
             host_network,
             shell: None,
+            hooks: &hooks,
         };
         configure(&mut session);
         session.create_args()
@@ -414,6 +430,10 @@ mod tests {
 
         assert!(has(&args, "--env", "VZ_UID=1000"), "{args:?}");
         assert!(has(&args, "--env", "HOME=/home/sally"), "{args:?}");
+        assert!(
+            has(&args, "--env", "VZ_REPO=/home/sally/repos/vz"),
+            "{args:?}"
+        );
         assert!(has(&args, "--env", "TERM=xterm-256color"), "{args:?}");
     }
 
@@ -533,6 +553,34 @@ mod tests {
         assert!(has(&fish, "--env", "VZ_SHELL=fish"), "{fish:?}");
         assert!(
             !unset.iter().any(|arg| arg.starts_with("VZ_SHELL")),
+            "{unset:?}"
+        );
+    }
+
+    #[test]
+    fn run_command__hooks__json_arrays_in_env_only_when_set() {
+        // The session borrows it for any lifetime the helper picks.
+        let hooks = Box::leak(Box::new(EffectiveHooks {
+            create: vec!["npm ci".to_owned(), "echo \"a b\"".to_owned()],
+            attach: vec!["git fetch".to_owned()],
+        }));
+        let set = args_configured(&[], false, false, false, |session| session.hooks = hooks);
+        let unset = args_for(&[], false);
+
+        assert!(
+            has(
+                &set,
+                "--env",
+                r#"VZ_HOOKS_CREATE=["npm ci","echo \"a b\""]"#
+            ),
+            "{set:?}"
+        );
+        assert!(
+            has(&set, "--env", r#"VZ_HOOKS_ATTACH=["git fetch"]"#),
+            "{set:?}"
+        );
+        assert!(
+            !unset.iter().any(|arg| arg.starts_with("VZ_HOOKS")),
             "{unset:?}"
         );
     }

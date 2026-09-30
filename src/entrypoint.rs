@@ -1,16 +1,21 @@
 //! `vz entrypoint`: the container's first process. It starts as root, adds
 //! the host user to the image unless the image already has it, gives it its
-//! home, then becomes that user and replaces itself with the command; or, in
-//! a persistent container, holds it open for shells to attach.
+//! home, then enters: runs the hooks, becomes that user and replaces itself
+//! with the command; or, in a persistent container, holds it open for shells
+//! to attach.
 //!
 //! `vz enter`: an attached shell, through `docker exec`. It waits until the
-//! entrypoint is ready, then becomes the user the same way.
+//! entrypoint is ready, then enters the same way.
+//!
+//! `vz as-user`: a hook, run by either. It becomes the user, then replaces
+//! itself with the hook's `sh -c`.
 
 use std::collections::BTreeSet;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -20,9 +25,10 @@ use nix::unistd::{Gid, Uid, setgid, setgroups, setuid};
 use tracing::{debug, warn};
 
 use crate::constants::{
-    FALLBACK_TERM, GROUP_FILE, GROUPS_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE,
-    MOUNTINFO_FILE, PASSWD_FILE, READY_FILE, SESSION_DIR, SHELL_ENV, SHELLS, SUDO_BINARIES,
-    SUDO_ENV, SUDOERS_FILE, TERM_ENV, TERMINFO_DIRS,
+    CREATED_DIR, ENTRYPOINT_PATH, FALLBACK_TERM, GROUP_FILE, GROUPS_ENV, HOOKS_ATTACH_ENV,
+    HOOKS_CREATE_ENV, HOSTNAME_ADDRESS, HOSTNAME_FILE, HOSTS_FILE, MOUNTINFO_FILE, PASSWD_FILE,
+    READY_FILE, REPO_ENV, SESSION_DIR, SHELL_ENV, SHELLS, SUDO_BINARIES, SUDO_ENV, SUDOERS_FILE,
+    TERM_ENV, TERMINFO_DIRS,
 };
 use crate::user::{ExtraGroup, User, with_line};
 
@@ -46,6 +52,7 @@ pub fn run(command: &[String], hold: bool) -> anyhow::Result<()> {
     }
     prepare_home(&user)?;
     give_mount_parents(&user)?;
+    clear_stale_claim(Path::new(CREATED_DIR))?;
     mark_ready()?;
 
     if hold {
@@ -55,7 +62,7 @@ pub fn run(command: &[String], hold: bool) -> anyhow::Result<()> {
             std::thread::park();
         }
     }
-    exec_as_user(&user, &extra_groups, &shell, command)
+    enter_as_user(&user, &extra_groups, &shell, command)
 }
 
 /// Returns only on failure; on success the command replaces this process.
@@ -64,7 +71,34 @@ pub fn enter(command: &[String]) -> anyhow::Result<()> {
     let user = User::from_env()?;
     let extra_groups = extra_groups()?;
     let shell = choose_shell()?;
-    exec_as_user(&user, &extra_groups, &shell, command)
+    enter_as_user(&user, &extra_groups, &shell, command)
+}
+
+/// A hook's process: becomes the user, then replaces itself with the command.
+pub fn as_user(command: &[String]) -> anyhow::Result<()> {
+    let user = User::from_env()?;
+    become_user(&user, &extra_groups()?)?;
+    let (program, args) = command.split_first().context("no command")?;
+    Err(anyhow!(Command::new(program).args(args).exec()))
+        .with_context(|| format!("starting {program}"))
+}
+
+/// Every entry, the container's first included: the create hooks once per
+/// container, the attach hooks, then the command as the user. Each has the
+/// terminal, so hooks show their output and failures.
+fn enter_as_user(
+    user: &User,
+    extra_groups: &[ExtraGroup],
+    shell: &Path,
+    command: &[String],
+) -> anyhow::Result<()> {
+    ensure_created(
+        Path::new(CREATED_DIR),
+        || run_hooks("create", HOOKS_CREATE_ENV, user, shell),
+        |pid| Path::new(&format!("/proc/{pid}")).exists(),
+    )?;
+    run_hooks("attach", HOOKS_ATTACH_ENV, user, shell)?;
+    exec_as_user(user, extra_groups, shell, command)
 }
 
 fn extra_groups() -> anyhow::Result<Vec<ExtraGroup>> {
@@ -79,13 +113,163 @@ fn exec_as_user(
 ) -> anyhow::Result<()> {
     become_user(user, extra_groups)?;
     let mut process = user_command(user, shell, command);
+    with_term(&mut process, &user.home);
+    debug!("exec {process:?} as {}", user.name);
+    Err(anyhow!(process.exec())).context("starting the command")
+}
+
+/// TERM one the image describes.
+fn with_term(process: &mut Command, home: &Path) {
     let term = std::env::var(TERM_ENV).unwrap_or_default();
-    if let Some(fallback) = term_fallback(&term, &terminfo_dirs(&user.home), |path| path.exists()) {
+    if let Some(fallback) = term_fallback(&term, &terminfo_dirs(home), |path| path.exists()) {
         debug!("the image has no terminal description for {term}; TERM={fallback} instead");
         process.env(TERM_ENV, fallback);
     }
-    debug!("exec {process:?} as {}", user.name);
-    Err(anyhow!(process.exec())).context("starting the command")
+}
+
+/// Two files mark the create hooks, in the container's writable layer: it
+/// keeps them across a stop and start, and goes with the container. The
+/// first entry claims `creating`, writing its pid, runs the hooks, then
+/// renames it `created`; a failure removes it, so the next entry retries.
+/// Another entry waits meanwhile, and takes over a claim whose process is
+/// gone.
+fn ensure_created(
+    dir: &Path,
+    create: impl FnOnce() -> anyhow::Result<()>,
+    running: impl Fn(u32) -> bool,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let (creating, created) = (dir.join("creating"), dir.join("created"));
+    let mut create = Some(create);
+    loop {
+        if created.exists() {
+            return Ok(());
+        }
+        match claim(&creating) {
+            Ok(()) if created.exists() => return remove(&creating),
+            Ok(()) => {
+                let create = create.take().expect("an entry claims at most once");
+                return match create() {
+                    Ok(()) => std::fs::rename(&creating, &created)
+                        .with_context(|| format!("writing {}", created.display())),
+                    Err(error) => {
+                        remove(&creating)?;
+                        Err(error)
+                    }
+                };
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                debug!("waiting for another entry's create hooks");
+                wait_for_claim(&creating, &created, &running)?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("creating {}", creating.display()));
+            }
+        }
+    }
+}
+
+fn claim(creating: &Path) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(creating)?;
+    std::io::Write::write_all(&mut file, std::process::id().to_string().as_bytes())
+}
+
+/// Until the hooks are done, or the claim is gone: failed, or its process
+/// ended without finishing. A claim without its pid yet is being written.
+fn wait_for_claim(
+    creating: &Path,
+    created: &Path,
+    running: impl Fn(u32) -> bool,
+) -> anyhow::Result<()> {
+    while !created.exists() {
+        let holder = match std::fs::read_to_string(creating) {
+            Ok(text) => text.trim().parse::<u32>().ok(),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", creating.display()));
+            }
+        };
+        if holder.is_some_and(|pid| !running(pid)) {
+            return remove(creating);
+        }
+        std::thread::sleep(READY_POLL);
+    }
+    Ok(())
+}
+
+/// A claim left by a start that stopped midway: at start, no entry runs.
+fn clear_stale_claim(dir: &Path) -> anyhow::Result<()> {
+    remove(&dir.join("creating"))
+}
+
+/// Gone already is fine.
+fn remove(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Each command of `env_var`'s list, in order, through `sh -c` as the user,
+/// in the repository; the first that fails stops the entry.
+fn run_hooks(kind: &str, env_var: &str, user: &User, shell: &Path) -> anyhow::Result<()> {
+    let commands = parse_hooks(std::env::var_os(env_var).as_deref())
+        .with_context(|| format!("reading {env_var}"))?;
+    if commands.is_empty() {
+        return Ok(());
+    }
+    let repo = std::env::var_os(REPO_ENV)
+        .with_context(|| format!("{REPO_ENV} is unset; hooks run in the repository"))?;
+    let sh = find_program("sh", &std::env::var("PATH").unwrap_or_default())
+        .context("hooks run through sh, which the image lacks")?;
+    for command in &commands {
+        debug!("hook ({kind}): {command}");
+        let mut process = hook_command(user, shell, &sh, Path::new(&repo), command);
+        with_term(&mut process, &user.home);
+        let status = process
+            .status()
+            .with_context(|| format!("starting {kind} hook `{command}`"))?;
+        if !status.success() {
+            let how = match status.code() {
+                Some(code) => format!("exit status {code}"),
+                None => format!("signal {}", status.signal().unwrap_or_default()),
+            };
+            bail!("{kind} hook `{command}`: {how}");
+        }
+    }
+    Ok(())
+}
+
+/// A hook list as the launcher passes it: a JSON array; none when unset.
+fn parse_hooks(value: Option<&OsStr>) -> anyhow::Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let text = value.to_str().context("not UTF-8")?;
+    serde_json::from_str(text).context("not a JSON array of commands")
+}
+
+/// `vz as-user -- sh -c COMMAND` in the repository: a child can't join the
+/// user's extra groups through `Command` on stable Rust, so it becomes the
+/// user itself, as the entrypoint does.
+fn hook_command(user: &User, shell: &Path, sh: &Path, repo: &Path, command: &str) -> Command {
+    let command = [ENTRYPOINT_PATH, "as-user", "--"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([
+            sh.display().to_string(),
+            "-c".to_owned(),
+            command.to_owned(),
+        ])
+        .collect::<Vec<_>>();
+    let mut process = user_command(user, shell, &command);
+    process.current_dir(repo);
+    process
 }
 
 /// The session folder is a tmpfs, empty on every start: the mark is this
@@ -370,7 +554,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
 
+    use clap::Parser;
+
     use super::*;
+    use crate::cli::{Action, Cli};
 
     fn sally() -> User {
         User {
@@ -494,6 +681,154 @@ mod tests {
             (OsStr::new("USER"), Some(OsStr::new("sally"))),
         ]);
         assert_eq!(env, expected);
+    }
+
+    #[test]
+    fn parse_hooks__env_value__commands_in_order_or_refused() {
+        let cases: [(Option<&str>, Option<&[&str]>); 5] = [
+            (None, Some(&[])),
+            (
+                Some(r#"["npm ci","echo \"a b\""]"#),
+                Some(&["npm ci", "echo \"a b\""]),
+            ),
+            (Some("[]"), Some(&[])),
+            (Some("npm ci"), None),
+            (Some(r#"{"create":"npm ci"}"#), None),
+        ];
+        for (value, expected) in cases {
+            let parsed = parse_hooks(value.map(OsStr::new)).ok();
+
+            let expected =
+                expected.map(|commands| commands.iter().map(|c| c.to_string()).collect());
+            assert_eq!(parsed, expected, "{value:?}");
+        }
+    }
+
+    fn npm_ci_hook() -> Command {
+        hook_command(
+            &sally(),
+            Path::new("/bin/bash"),
+            Path::new("/bin/sh"),
+            Path::new("/home/sally/repos/app"),
+            "npm ci",
+        )
+    }
+
+    #[test]
+    fn hook_command__command__sh_c_as_the_user_in_the_repository() {
+        let process = npm_ci_hook();
+
+        assert_eq!(process.get_program(), ENTRYPOINT_PATH);
+        assert_eq!(
+            process.get_args().collect::<Vec<_>>(),
+            ["as-user", "--", "/bin/sh", "-c", "npm ci"].map(OsStr::new)
+        );
+        assert_eq!(
+            process.get_current_dir(),
+            Some(Path::new("/home/sally/repos/app"))
+        );
+        let env: BTreeMap<&OsStr, Option<&OsStr>> = process.get_envs().collect();
+        assert_eq!(env[OsStr::new("USER")], Some(OsStr::new("sally")));
+        assert_eq!(env[OsStr::new("SHELL")], Some(OsStr::new("/bin/bash")));
+    }
+
+    /// The hook's arguments after the binary parse back into `as-user`.
+    #[test]
+    fn hook_command__args__parse_as_as_user() {
+        let process = npm_ci_hook();
+        let args = process
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned());
+
+        let cli = Cli::try_parse_from(std::iter::once("vz".to_owned()).chain(args)).unwrap();
+
+        let command = ["/bin/sh", "-c", "npm ci"].map(str::to_owned).to_vec();
+        assert_eq!(cli.action, Some(Action::AsUser { command }));
+    }
+
+    /// What `ensure_created` did: whether it succeeded, how often the hooks
+    /// ran, and the marker files it left.
+    #[derive(Debug, PartialEq)]
+    struct Created {
+        ok: bool,
+        runs: usize,
+        left: Vec<String>,
+    }
+
+    /// `ensure_created` in a temporary folder that already holds `files`,
+    /// with hooks that succeed or not.
+    fn ensure_created_in(files: &[(&str, &str)], hooks_succeed: bool) -> Created {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, content) in files {
+            std::fs::write(dir.path().join(name), content).unwrap();
+        }
+        let mut runs = 0;
+        let create = || {
+            runs += 1;
+            match hooks_succeed {
+                true => Ok(()),
+                false => Err(anyhow!("create hook `exit 3`: exit status 3")),
+            }
+        };
+        // No process is running but this one.
+        let result = ensure_created(dir.path(), create, |pid| pid == std::process::id());
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        Created {
+            ok: result.is_ok(),
+            runs,
+            left,
+        }
+    }
+
+    #[test]
+    fn ensure_created__markers__hooks_run_once_per_container() {
+        let created = |ok: bool, runs: usize, left: &[&str]| Created {
+            ok,
+            runs,
+            left: left.iter().map(|file| file.to_string()).collect(),
+        };
+        let cases = [
+            (
+                "the first entry",
+                &[][..],
+                true,
+                created(true, 1, &["created"]),
+            ),
+            (
+                "created already",
+                &[("created", "")],
+                true,
+                created(true, 0, &["created"]),
+            ),
+            (
+                "a failure, retried next",
+                &[],
+                false,
+                created(false, 1, &[]),
+            ),
+            // Its process ended without finishing: taken over.
+            (
+                "a stale claim",
+                &[("creating", "4194305")],
+                true,
+                created(true, 1, &["created"]),
+            ),
+            (
+                "created wins over a claim",
+                &[("creating", "4194305"), ("created", "")],
+                true,
+                created(true, 0, &["created", "creating"]),
+            ),
+        ];
+        for (name, files, hooks_succeed, expected) in cases {
+            let actual = ensure_created_in(files, hooks_succeed);
+
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 
     #[test]

@@ -131,6 +131,18 @@ pub const TERMINFO_DIRS: [&str; 4] = [
     "/usr/lib/terminfo",
 ];
 
+/// The hooks' commands, each list a JSON array; set only when not empty.
+/// `docker exec` inherits them, so `vz enter` reads them too.
+pub const HOOKS_CREATE_ENV: &str = "VZ_HOOKS_CREATE";
+pub const HOOKS_ATTACH_ENV: &str = "VZ_HOOKS_ATTACH";
+
+/// The repository root, the same path inside as on the host: where hooks run.
+pub const REPO_ENV: &str = "VZ_REPO";
+
+/// In the container's writable layer: survives a stop and start, goes with
+/// the container. Marks the create hooks as claimed, then as run.
+pub const CREATED_DIR: &str = "/var/lib/viz-shell";
+
 /// Where the shell is: the container's name, and the profile it runs, when one.
 pub const CONTAINER_ENV: &str = "VZ_CONTAINER";
 pub const CONTAINER_PROFILE_ENV: &str = "VZ_CONTAINER_PROFILE";
