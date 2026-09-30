@@ -159,22 +159,28 @@ manner of fastfetch: what the shell is about to be. Colored on a terminal, unles
 The environment shows as a count, never names or values.
 
 ```
-       _              _          _ _    sally@vz-0-app
-__   _(_)____     ___| |__   ___| | |   --------------
-\ \ / / |_  /____/ __| '_ \ / _ \ | |   Version: 0.1.0
- \ V /| |/ /_____\__ \ | | |  __/ | |   Session: new, removed on exit
-  \_/ |_/___|    |___/_| |_|\___|_|_|   Repo: ~/repos/app
-                                        Branch: main
-                                        Config: global.yml, viz-shell.yml
-                                        Profile: trusted
-                                        Image: vz-app:3f9c2a1b7d4e8f60
-                                        Shell: fish
-                                        Sudo: yes
-                                        Docker: /run/user/1000/docker.sock
-                                        Network: the host's
-                                        Mounts: ~/repos (ro), ~/.ssh (ro)
-                                        State: 2 paths in ~/repos/app/.vz_state
-                                        Env: 3 variables
+       _              _          _ _
+__   _(_)____     ___| |__   ___| | |
+\ \ / / |_  /____/ __| '_ \ / _ \ | |
+ \ V /| |/ /_____\__ \ | | |  __/ | |
+  \_/ |_/___|    |___/_| |_|\___|_|_|
+
+sally@vz-0-app
+--------------
+Version: 0.1.0
+Session: new, ephemeral
+Repo: ~/repos/app
+Branch: main
+Config: global.yml, viz-shell.yml
+Profile: trusted
+Image: vz-app:3f9c2a1b7d4e8f60
+Shell: fish
+Sudo: yes
+Docker: /run/user/1000/docker.sock
+Network: host
+Mounts: 3 (2 global.yml, 1 viz-shell.yml)
+State: 2 paths in ~/repos/app/.vz_state
+Env: 3 variables
 ```
 
 The default global configuration turns it on; `banner: false` in a repository or profile turns it off.
@@ -485,9 +491,9 @@ Every collection is a list, merged the same way: root, then the `extends` chain,
 
 `~/.config/viz-shell/global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a repository's
 configuration, and every repository starts from it. The first `vz` writes it from its built-in
-default (`DEFAULT_GLOBAL` in [`src/config.rs`](src/config.rs)) when there is none, and never
-overwrites it: an untrusted default with the banner on, and a `trusted` profile with sudo, docker,
-the host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
+default ([`templates/global.yml`](templates/global.yml), embedded in the binary) when there is
+none, and never overwrites it: an untrusted default with the banner on, and a `trusted` profile
+with sudo, docker, the host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
 
 - A repository without a configuration runs from the global one alone.
 - Layers, later wins: global root, repository root, then for the chosen profile and each it extends

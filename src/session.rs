@@ -268,7 +268,7 @@ mod tests {
 
     use super::*;
     use crate::cli::{Action, Cli};
-    use crate::config::StateKind;
+    use crate::config::{ConfigFile, StateKind};
 
     fn sally() -> User {
         User {
@@ -310,12 +310,14 @@ mod tests {
                 target: PathBuf::from("/home/sally/repos"),
                 read_only: true,
                 point_in_state: None,
+                file: ConfigFile::Repository,
             },
             HostMount {
                 source: PathBuf::from("/home/sally/repos/skills"),
                 target: PathBuf::from("/home/sally/.agents/skills"),
                 read_only: true,
                 point_in_state: None,
+                file: ConfigFile::Repository,
             },
         ];
         let docker = DockerSocket {

@@ -28,6 +28,23 @@ pub struct Config {
     repo: Option<Layer>,
 }
 
+/// One of the configuration files: where an effective entry was last set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConfigFile {
+    Global,
+    Repository,
+}
+
+impl ConfigFile {
+    /// As the layers' labels name it: `global`, `repo`.
+    fn origin(self) -> &'static str {
+        match self {
+            ConfigFile::Global => "global",
+            ConfigFile::Repository => "repo",
+        }
+    }
+}
+
 /// A profile as `vz profiles` shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileInfo {
@@ -577,6 +594,8 @@ pub struct MountEntry {
     /// Inside, when not the same path.
     pub target: Option<String>,
     pub mode: MountMode,
+    /// The file whose layer set it last.
+    pub file: ConfigFile,
 }
 
 impl Config {
@@ -597,25 +616,30 @@ impl Config {
             Some(name) => self.chain(name)?,
             None => Vec::new(),
         };
-        let mut layers: Vec<(String, &Layer)> = Vec::new();
-        layers.extend(
-            self.global
-                .iter()
-                .map(|root| ("global root".to_owned(), root)),
-        );
-        layers.extend(self.repo.iter().map(|root| ("repo root".to_owned(), root)));
+        let mut layers: Vec<(String, ConfigFile, &Layer)> = self
+            .files()
+            .map(|(file, root)| (format!("{} root", file.origin()), file, root))
+            .collect();
         for name in &chain {
-            for (origin, file) in self.files() {
-                if let Some(section) = file.profiles.get(name) {
-                    layers.push((format!("{origin} {name}"), section));
+            for (file, layer) in self.files() {
+                if let Some(section) = layer.profiles.get(name) {
+                    layers.push((format!("{} {name}", file.origin()), file, section));
                 }
             }
         }
         let merged = layers
             .iter()
-            .fold(Layer::default(), |base, (_, over)| base.merge(over));
-        let mut effective = EffectiveConfig::resolve(merged)?;
-        effective.layers = layers.into_iter().map(|(label, _)| label).collect();
+            .fold(Layer::default(), |base, (_, _, over)| base.merge(over));
+        let mount_file = |key: &str| {
+            layers
+                .iter()
+                .rev()
+                .find(|(_, _, layer)| layer.mounts.iter().any(|entry| entry.key() == key))
+                .map(|(_, file, _)| *file)
+                .expect("an effective mount comes from a layer")
+        };
+        let mut effective = EffectiveConfig::resolve(merged, mount_file)?;
+        effective.layers = layers.into_iter().map(|(label, _, _)| label).collect();
         Ok(effective)
     }
 
@@ -626,8 +650,8 @@ impl Config {
             .map(|name| ProfileInfo {
                 defined_in: self
                     .files()
-                    .filter(|(_, file)| file.profiles.contains_key(&name))
-                    .map(|(origin, _)| origin)
+                    .filter(|(_, layer)| layer.profiles.contains_key(&name))
+                    .map(|(file, _)| file.origin())
                     .collect(),
                 extends: self.extends(&name).map(str::to_owned),
                 changes: self
@@ -640,13 +664,13 @@ impl Config {
             .collect()
     }
 
-    fn files(&self) -> impl Iterator<Item = (&'static str, &Layer)> {
+    fn files(&self) -> impl Iterator<Item = (ConfigFile, &Layer)> {
         [
-            ("global", self.global.as_ref()),
-            ("repo", self.repo.as_ref()),
+            (ConfigFile::Global, self.global.as_ref()),
+            (ConfigFile::Repository, self.repo.as_ref()),
         ]
         .into_iter()
-        .filter_map(|(origin, file)| Some((origin, file?)))
+        .filter_map(|(file, layer)| Some((file, layer?)))
     }
 
     fn profile_names(&self) -> BTreeSet<String> {
@@ -901,7 +925,8 @@ pub fn is_env_name(name: &str) -> bool {
 }
 
 impl EffectiveConfig {
-    fn resolve(layer: Layer) -> anyhow::Result<Self> {
+    /// `mount_file` names the file that set a mount last, by its key.
+    fn resolve(layer: Layer, mount_file: impl Fn(&str) -> ConfigFile) -> anyhow::Result<Self> {
         let image = layer
             .image
             .context("no image: set `image:` in the global or the repository configuration")?;
@@ -931,11 +956,13 @@ impl EffectiveConfig {
                     path: path.clone(),
                     target: None,
                     mode: MountMode::Rw,
+                    file: mount_file(entry.key()),
                 },
                 MountItem::Full(spec) => MountEntry {
                     path: spec.path.clone(),
                     target: spec.target.clone().filter(|target| *target != spec.path),
                     mode: spec.mode,
+                    file: mount_file(entry.key()),
                 },
             })
             .collect();
@@ -1073,59 +1100,9 @@ impl EffectiveConfig {
     }
 }
 
-/// The global configuration a first run writes.
-pub const DEFAULT_GLOBAL: &str = r#"# The global configuration: what every repository starts from. viz-shell wrote
-# it on its first run and never overwrites it: edit it freely. A repository's own configuration comes on
-# top: its root over this root, its profiles over these of the same name.
-# Relative paths here are relative to this folder.
-
-# The default mode: plain `vz`, untrusted. Nothing of the host but the repo.
-image: debian:stable-slim
-
-# A banner above an interactive shell, like fastfetch: the repository, branch,
-# profile, image, shell, and what the shell shares and may do. Never above
-# `vz -- command`.
-banner: true
-
-# The interactive shell for every repository: a name on the image's PATH, or an
-# absolute path. An image without it gives a warning, then bash, else sh.
-# shell: fish
-
-env:
-  files:
-    # Variables for every repository; skipped while the file does not exist.
-    - environment
-  passthrough:
-    - EDITOR
-
-# A mount must exist on the host, or vz refuses to start: uncomment what you have.
-# mounts:
-#   - ~/.gitconfig:ro       # your git identity, read-only
-
-profiles:
-  # `vz --profile trusted`: for repositories you trust. A repository extends it
-  # with its own `trusted:`, or with `extends: trusted` in another profile.
-  trusted:
-    privileges:
-      # Root through sudo, with docker's default capabilities, instead of the
-      # secure floor, where the shell holds none. The image needs sudo.
-      sudo: true
-    share:
-      # The host's docker daemon: root-equivalent control of the host.
-      docker: true
-      # The host's network: its localhost and ports. Without it the shell still
-      # reaches the internet, through docker's network.
-      host_network: true
-    mounts:
-      # ssh as on the host, read-only: keys readable inside.
-      - ~/.ssh:ro
-    env:
-      files:
-        # Secrets only trusted mode sees; skipped while the file does not exist.
-        - trusted.env
-      passthrough:
-        - GH_TOKEN
-"#;
+/// The global configuration a first run writes to `~/.config/viz-shell/global.yml`:
+/// `templates/global.yml`, embedded at build time.
+pub const DEFAULT_GLOBAL: &str = include_str!("../templates/global.yml");
 
 /// Writes the default global configuration when there is none; never
 /// overwrites. Returns whether it wrote.
@@ -1239,6 +1216,7 @@ mod tests {
             path: path.to_owned(),
             target: None,
             mode,
+            file: ConfigFile::Repository,
         }
     }
 
@@ -2299,6 +2277,28 @@ profiles:
         // Global `~/.gitconfig`; the repo disables `~/.gitconfig` too: both
         // are /home/sally/.gitconfig once read.
         assert_eq!(config.mounts, vec![]);
+    }
+
+    #[test]
+    fn effective__mounts_across_files__each_from_the_file_that_set_it_last() {
+        let global = "image: debian\nmounts:\n  - ~/a:ro\n  - ~/b\n";
+        let repo = "mounts:\n  - ~/a\nprofiles:\n  extra:\n    mounts:\n      - ~/c\n";
+
+        let config = both(global, repo).effective(Some("extra")).unwrap();
+
+        let files: Vec<(&str, ConfigFile)> = config
+            .mounts
+            .iter()
+            .map(|mount| (mount.path.as_str(), mount.file))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("/home/sally/a", ConfigFile::Repository),
+                ("/home/sally/b", ConfigFile::Global),
+                ("/home/sally/c", ConfigFile::Repository),
+            ]
+        );
     }
 
     #[test]

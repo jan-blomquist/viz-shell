@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail, ensure};
 use tracing::debug;
 
-use crate::config::{MountEntry, MountMode, StateKind, expand_path};
+use crate::config::{ConfigFile, MountEntry, MountMode, StateKind, expand_path};
 use crate::state::StateMount;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,6 +20,8 @@ pub struct HostMount {
     /// When it lands inside a state folder: its mount point there, which vz
     /// creates as the user so the engine does not create it as root.
     pub point_in_state: Option<PathBuf>,
+    /// The configuration file that set it last.
+    pub file: ConfigFile,
 }
 
 /// A mount may land inside a state folder, but not hold one or replace one:
@@ -79,6 +81,7 @@ pub fn plan(
                 target,
                 read_only: entry.mode == MountMode::Ro,
                 point_in_state,
+                file: entry.file,
             })
         })
         .collect()
@@ -132,6 +135,7 @@ mod tests {
             path: path.to_owned(),
             target: target.map(str::to_owned),
             mode,
+            file: ConfigFile::Repository,
         }
     }
 
@@ -150,6 +154,7 @@ mod tests {
             target: PathBuf::from(target),
             read_only,
             point_in_state: None,
+            file: ConfigFile::Repository,
         }
     }
 
@@ -251,6 +256,7 @@ mod tests {
             target: PathBuf::from("/home/sally/.config/opencode").join(name),
             read_only: true,
             point_in_state: Some(state.join(name)),
+            file: ConfigFile::Repository,
         };
         let mounts = [
             mount(&dir_source, "skills"),
