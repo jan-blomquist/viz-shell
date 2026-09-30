@@ -394,13 +394,73 @@ impl Keyed for StateItem {
     }
 }
 
-/// A mount: a bare path, read-only, or expanded. Keyed by where it lands
-/// inside, so one host path can land in several places.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// A mount: `path[:target][:ro|rw]`, read-write unless `:ro`, or expanded.
+/// Keyed by where it lands inside, so one host path can land in several
+/// places. A string is parsed as it is read: `Path` is a bare path,
+/// read-write; anything else is `Full`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum MountItem {
     Path(String),
     Full(MountSpec),
+}
+
+impl<'de> Deserialize<'de> for MountItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            Short(String),
+            Full(MountSpec),
+        }
+        match Written::deserialize(deserializer)? {
+            Written::Short(spec) => parse_mount(&spec)
+                .map(MountItem::from)
+                .map_err(serde::de::Error::custom),
+            Written::Full(spec) => Ok(MountItem::Full(spec)),
+        }
+    }
+}
+
+impl From<MountSpec> for MountItem {
+    /// The shortest form that says the same.
+    fn from(spec: MountSpec) -> Self {
+        match spec {
+            MountSpec {
+                path,
+                target: None,
+                mode: MountMode::Rw,
+                enabled: true,
+            } => MountItem::Path(path),
+            spec => MountItem::Full(spec),
+        }
+    }
+}
+
+/// Docker's `-v` grammar: `path[:target][:ro|rw]`. Each path starts with `/`
+/// or `~`; [`check_path`] checks them further.
+fn parse_mount(spec: &str) -> anyhow::Result<MountSpec> {
+    let is_mode = |s: &str| matches!(s, "ro" | "rw");
+    let is_path = |s: &str| s.starts_with('/') || s.starts_with('~');
+    let fields: Vec<&str> = spec.split(':').collect();
+    let (path, target, mode) = match fields.as_slice() {
+        [path] if is_path(path) => (path, None, None),
+        [path, mode] if is_path(path) && is_mode(mode) => (path, None, Some(mode)),
+        [path, target] if is_path(path) && is_path(target) => (path, Some(target), None),
+        [path, target, mode] if is_path(path) && is_path(target) && is_mode(mode) => {
+            (path, Some(target), Some(mode))
+        }
+        _ => bail!("mount `{spec}`: expected path[:target][:ro|rw]"),
+    };
+    Ok(MountSpec {
+        path: path.to_string(),
+        target: target.map(|target| target.to_string()),
+        mode: match mode {
+            Some(&"ro") => MountMode::Ro,
+            _ => MountMode::Rw,
+        },
+        enabled: true,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -411,7 +471,7 @@ pub struct MountSpec {
     /// Inside the container; the same as `path` when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    #[serde(default, skip_serializing_if = "MountMode::is_ro")]
+    #[serde(default, skip_serializing_if = "MountMode::is_rw")]
     pub mode: MountMode,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub enabled: bool,
@@ -420,14 +480,14 @@ pub struct MountSpec {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MountMode {
-    #[default]
     Ro,
+    #[default]
     Rw,
 }
 
 impl MountMode {
-    fn is_ro(&self) -> bool {
-        *self == MountMode::Ro
+    fn is_rw(&self) -> bool {
+        *self == MountMode::Rw
     }
 }
 
@@ -870,7 +930,7 @@ impl EffectiveConfig {
                 MountItem::Path(path) => MountEntry {
                     path: path.clone(),
                     target: None,
-                    mode: MountMode::Ro,
+                    mode: MountMode::Rw,
                 },
                 MountItem::Full(spec) => MountEntry {
                     path: spec.path.clone(),
@@ -982,14 +1042,13 @@ impl EffectiveConfig {
         let mounts = self
             .mounts
             .iter()
-            .map(|entry| match (&entry.target, entry.mode) {
-                (None, MountMode::Ro) => MountItem::Path(entry.path.clone()),
-                (target, mode) => MountItem::Full(MountSpec {
+            .map(|entry| {
+                MountItem::from(MountSpec {
                     path: entry.path.clone(),
-                    target: target.clone(),
-                    mode,
+                    target: entry.target.clone(),
+                    mode: entry.mode,
                     enabled: true,
-                }),
+                })
             })
             .collect();
         Layer {
@@ -1041,7 +1100,7 @@ env:
 
 # A mount must exist on the host, or vz refuses to start: uncomment what you have.
 # mounts:
-#   - ~/.gitconfig          # your git identity, read-only
+#   - ~/.gitconfig:ro       # your git identity, read-only
 
 profiles:
   # `vz --profile trusted`: for repositories you trust. A repository extends it
@@ -1058,8 +1117,8 @@ profiles:
       # reaches the internet, through docker's network.
       host_network: true
     mounts:
-      # ssh as on the host: keys readable inside.
-      - ~/.ssh
+      # ssh as on the host, read-only: keys readable inside.
+      - ~/.ssh:ro
     env:
       files:
         # Secrets only trusted mode sees; skipped while the file does not exist.
@@ -1186,14 +1245,14 @@ mod tests {
     const BASE: &str = "\
 image: debian
 mounts:
-  - ~/repos
-  - ~/.gitconfig
+  - ~/repos:ro
+  - ~/.gitconfig:ro
 state:
   - ~/.cache
 profiles:
   writable:
     mounts:
-      - { path: ~/repos, mode: rw }
+      - ~/repos
   bare:
     mounts:
       - { path: ~/repos, enabled: false }
@@ -1255,7 +1314,7 @@ state:
     }
 
     #[test]
-    fn effective__mount_forms__bare_is_read_only_disabled_dropped() {
+    fn effective__mount_forms__bare_is_read_write_disabled_dropped() {
         let text = "\
 image: debian
 mounts:
@@ -1268,7 +1327,7 @@ mounts:
         let config = effective(text, None);
 
         let expected = vec![
-            mount("~/a", MountMode::Ro),
+            mount("~/a", MountMode::Rw),
             mount("~/b", MountMode::Ro),
             mount("~/c", MountMode::Rw),
         ];
@@ -1666,34 +1725,34 @@ profiles:
 image: debian
 mounts:
   - { path: ~/skills, target: ~/.agents/skills }
-  - { path: ~/skills, target: ~/.claude/skills }
+  - { path: ~/skills, target: ~/.config/opencode/skills }
   - { path: ~/same, target: ~/same }
 profiles:
   agents-only:
     mounts:
-      - { path: ~/skills, target: ~/.claude/skills, enabled: false }
+      - { path: ~/skills, target: ~/.config/opencode/skills, enabled: false }
 ";
 
     #[test]
     fn effective__mount_targets__one_source_at_several_keyed_by_target() {
         let with_target = |target: &str| MountEntry {
             target: Some(target.to_owned()),
-            ..mount("~/skills", MountMode::Ro)
+            ..mount("~/skills", MountMode::Rw)
         };
         let cases = [
             (
                 None,
                 vec![
                     with_target("~/.agents/skills"),
-                    with_target("~/.claude/skills"),
-                    mount("~/same", MountMode::Ro),
+                    with_target("~/.config/opencode/skills"),
+                    mount("~/same", MountMode::Rw),
                 ],
             ),
             (
                 Some("agents-only"),
                 vec![
                     with_target("~/.agents/skills"),
-                    mount("~/same", MountMode::Ro),
+                    mount("~/same", MountMode::Rw),
                 ],
             ),
         ];
@@ -1709,6 +1768,136 @@ profiles:
         let yaml = config.to_yaml().unwrap();
 
         assert_eq!(effective(&yaml, None).mounts, config.mounts, "{yaml}");
+    }
+
+    fn spec(path: &str, target: Option<&str>, mode: MountMode) -> MountSpec {
+        MountSpec {
+            path: path.to_owned(),
+            target: target.map(str::to_owned),
+            mode,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn parse_mount__every_accepted_form__yields_path_target_mode() {
+        let cases = [
+            ("~/repos", spec("~/repos", None, MountMode::Rw)),
+            ("~/repos:ro", spec("~/repos", None, MountMode::Ro)),
+            ("~/repos:rw", spec("~/repos", None, MountMode::Rw)),
+            (
+                "~/skills:~/.agents/skills",
+                spec("~/skills", Some("~/.agents/skills"), MountMode::Rw),
+            ),
+            (
+                "~/skills:~/.agents/skills:ro",
+                spec("~/skills", Some("~/.agents/skills"), MountMode::Ro),
+            ),
+            (
+                "~/skills:~/.config/opencode/skills:rw",
+                spec("~/skills", Some("~/.config/opencode/skills"), MountMode::Rw),
+            ),
+            ("/srv/data", spec("/srv/data", None, MountMode::Rw)),
+            (
+                "/srv/data:/mnt/data:ro",
+                spec("/srv/data", Some("/mnt/data"), MountMode::Ro),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_mount(input).unwrap(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn parse_mount__malformed_specs__are_refused_quoting_them() {
+        let inputs = [
+            "~/a:rx",
+            "~/a:~/b:~/c",
+            "~/a::rw",
+            "repos",
+            "~/a:repos",
+            "~/a:ro:rw",
+            "",
+            ":ro",
+        ];
+        for input in inputs {
+            let message = format!("{:#}", parse_mount(input).unwrap_err());
+
+            assert!(
+                message.contains(&format!("`{input}`")),
+                "{input}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective__mount_map_form__matches_string_form() {
+        let cases = [
+            ("~/repos:ro", "{ path: ~/repos, mode: ro }"),
+            ("~/repos", "{ path: ~/repos, mode: rw }"),
+            (
+                "~/skills:~/.agents/skills",
+                "{ path: ~/skills, target: ~/.agents/skills }",
+            ),
+            (
+                "~/skills:~/.agents/skills:ro",
+                "{ path: ~/skills, target: ~/.agents/skills, mode: ro }",
+            ),
+        ];
+        let mounts =
+            |entry: &str| effective(&format!("image: debian\nmounts:\n  - {entry}\n"), None).mounts;
+        for (string, map) in cases {
+            assert_eq!(mounts(string), mounts(map), "{string} vs {map}");
+        }
+    }
+
+    #[test]
+    fn effective__string_form_in_a_profile__layers_by_target_else_path() {
+        let cases = [
+            (
+                "- ~/repos:ro",
+                "- ~/repos",
+                vec![mount("~/repos", MountMode::Rw)],
+            ),
+            (
+                "- ~/skills:~/.agents/skills",
+                "- { path: ~/skills, target: ~/.agents/skills, enabled: false }",
+                vec![],
+            ),
+        ];
+        for (base, over, expected) in cases {
+            let text = format!(
+                "image: debian\nmounts:\n  {base}\nprofiles:\n  p:\n    mounts:\n      {over}\n"
+            );
+
+            assert_eq!(
+                effective(&text, Some("p")).mounts,
+                expected,
+                "{base} / {over}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_yaml__mounts__bare_when_read_write_else_the_map_form() {
+        let text = "\
+image: debian
+mounts:
+  - ~/repos
+  - ~/notes:ro
+  - ~/skills:~/.agents/skills
+";
+        let config = effective(text, None);
+
+        let yaml = config.to_yaml().unwrap();
+
+        let emitted = (
+            yaml.contains("- ~/repos\n"),
+            yaml.contains("path: ~/notes") && yaml.contains("mode: ro"),
+            yaml.contains("target: ~/.agents/skills"),
+            effective(&yaml, None).mounts == config.mounts,
+        );
+        assert_eq!(emitted, (true, true, true, true), "{yaml}");
     }
 
     #[test]
@@ -1741,7 +1930,7 @@ mounts:
         let yaml = effective(text, None).to_yaml().unwrap();
 
         assert!(
-            yaml.contains("- ~/.a") && yaml.contains("- ~/b") && yaml.contains("mode: rw"),
+            yaml.contains("- ~/.a") && yaml.contains("mode: ro") && yaml.contains("- ~/c"),
             "{yaml}"
         );
     }
@@ -1785,12 +1974,12 @@ mounts:
 
     #[test]
     fn parse__invalid_path_in_a_profile__is_refused_naming_the_profile() {
-        let text = "image: debian\nprofiles:\n  ci:\n    mounts: [relative]\n";
+        let text = "image: debian\nprofiles:\n  ci:\n    mounts: [\"~/../x\"]\n";
 
         let message = error(text);
 
         assert!(
-            message.contains("profile `ci`") && message.contains("`relative`"),
+            message.contains("profile `ci`") && message.contains("`~/../x`"),
             "{message}"
         );
     }
