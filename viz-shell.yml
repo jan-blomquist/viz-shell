@@ -15,13 +15,14 @@ state:
   - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }
 
 mounts:
-  # All repositories, read-only. The repository vz runs for stays read-write:
-  # its own mount is deeper and lands on top. So does ledger, bare: read-write.
-  - ~/repos:ro
-  - ~/repos/ledger
+  # All repositories, read-only: bare, the default. The repository vz runs for
+  # stays read-write: its own mount is deeper and lands on top. So does ledger,
+  # read-write with :rw.
+  - ~/repos
+  - ~/repos/ledger:rw
   # ssh as on the host: keys, config and known hosts, read-only. The keys are
   # readable by everything inside the container.
-  - ~/.ssh:ro
+  - ~/.ssh
 
 share:
   # The host's docker daemon: `vz -- just examples` runs the example tests

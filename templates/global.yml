@@ -24,7 +24,7 @@ env:
 
 # A mount must exist on the host, or vz refuses to start: uncomment what you have.
 # mounts:
-#   - ~/.gitconfig:ro       # your git identity, read-only
+#   - ~/.gitconfig          # your git identity, read-only
 
 profiles:
   # `vz --profile trusted`: for repositories you trust. A repository extends it
@@ -42,7 +42,7 @@ profiles:
       host_network: true
     mounts:
       # ssh as on the host, read-only: keys readable inside.
-      - ~/.ssh:ro
+      - ~/.ssh
     env:
       files:
         # Secrets only trusted mode sees; skipped while the file does not exist.

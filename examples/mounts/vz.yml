@@ -1,5 +1,5 @@
 # Mounts: host paths shown inside the container, written as docker's -v:
-# path[:target][:ro|rw]. Read-write unless `:ro`; at the same path unless a
+# path[:target][:ro|rw]. Read-only unless `:rw`; at the same path unless a
 # target names another. They reuse the host's own files; each must exist on
 # the host.
 image: debian:stable-slim
@@ -9,18 +9,18 @@ state:
   - ~/.config/agent
 
 mounts:
-  # Every repository, read-only. The repository vz runs for stays read-write
-  # inside it.
-  - ~/repos:ro
-  # One repository read-write for every session, like a shared notes repo:
-  # the bare form. When vz runs for that repository itself, the entry is
-  # skipped: the repository is mounted there already.
-  - ~/repos/app
+  # Every repository, read-only: the bare form. The repository vz runs for
+  # stays read-write inside it.
+  - ~/repos
+  # One repository read-write for every session, like a shared notes repo.
+  # When vz runs for that repository itself, the entry is skipped: the
+  # repository is mounted there already.
+  - ~/repos/app:rw
   # The gh CLI's login, shared with the host, read-write.
-  - ~/.config/gh
+  - ~/.config/gh:rw
   # Your git identity: a single file, read-only.
-  - ~/.gitconfig:ro
+  - ~/.gitconfig
   # One host folder at two other paths, as a library several tools read:
   # one of them inside the state folder above. The map form says the same.
-  - ~/library:~/.agents/library:ro
-  - { path: ~/library, target: ~/.config/agent/library, mode: ro }
+  - ~/library:~/.agents/library
+  - { path: ~/library, target: ~/.config/agent/library }
