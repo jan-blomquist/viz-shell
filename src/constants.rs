@@ -4,10 +4,44 @@ use crate::config::MountMode;
 /// present is used; others present are ignored, with a warning.
 pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
 
-/// The global configuration: `$XDG_CONFIG_HOME/viz-shell/global.yml`, or
-/// `~/.config/viz-shell/global.yml` without it. What every repository starts from.
+/// Your own overlay of the repository's configuration, never checked in:
+/// each of `REPO_CONFIG_FILES` with `.local` before its extension, found
+/// by the same rule.
+pub const LOCAL_CONFIG_FILES: [&str; 4] = [
+    "viz-shell.local.yml",
+    "viz-shell.local.yaml",
+    "vz.local.yml",
+    "vz.local.yaml",
+];
+
+/// Inserted before a configuration file's extension to name its local overlay.
+pub const LOCAL_SUFFIX: &str = "local";
+
+/// The global configuration's folder: `$XDG_CONFIG_HOME/viz-shell`, or
+/// `~/.config/viz-shell` without it.
 pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";
-pub const GLOBAL_CONFIG_FILE: &str = "global.yml";
+
+/// The global configuration in its folder, by the same rule as
+/// `REPO_CONFIG_FILES`; a first run writes the first. What every repository
+/// starts from.
+pub const GLOBAL_CONFIG_FILES: [&str; 4] = [
+    "viz-shell.global.yml",
+    "viz-shell.global.yaml",
+    "vz.global.yml",
+    "vz.global.yaml",
+];
+
+/// The global configuration's former name, still read when none of
+/// `GLOBAL_CONFIG_FILES` is present.
+pub const LEGACY_GLOBAL_CONFIG_FILE: &str = "global.yml";
+
+/// The base image's Dockerfile, written next to the global configuration on
+/// a first run; the default global configuration builds it.
+pub const BASE_DOCKERFILE: &str = "viz-shell.base.Dockerfile";
+
+/// The profile every run applies: each file's top-level keys. Not a name a
+/// profile may take.
+pub const DEFAULT_PROFILE: &str = "default";
 
 /// Selects a profile when `--profile` is not given; CI sets it once.
 pub const PROFILE_ENV: &str = "VZ_PROFILE";
@@ -31,10 +65,13 @@ pub const DEFAULT_BUILD_CONTEXT: &str = ".";
 /// The engine's CLI, which vz runs for every engine operation.
 pub const DOCKER_CLI: &str = "docker";
 
-/// Built images are named `vz-<repository directory>:<content hash>`.
+/// Built images are named `vz-<the Dockerfile's folder>:<content hash>`.
 pub const BUILT_IMAGE_PREFIX: &str = "vz-";
 
-/// The image name when the repository directory has no usable characters.
+/// The build arg of a Dockerfile that stacks on the image below it.
+pub const BASE_ARG: &str = "BASE";
+
+/// The image name when the Dockerfile's folder has no usable characters.
 pub const FALLBACK_IMAGE_NAME: &str = "repo";
 
 /// Hex digits of the content hash kept in a built image's tag.

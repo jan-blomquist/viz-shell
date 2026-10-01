@@ -6,10 +6,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use anyhow::{Context, bail, ensure};
-use tracing::debug;
+use anyhow::{Context, ensure};
+use tracing::{debug, warn};
 
 use crate::config::{EffectiveEnv, EnvFile, is_env_name, resolve_host_path, substitute};
 
@@ -159,8 +158,8 @@ pub fn without_reserved(mut environment: Environment, reserved: &[&str]) -> Envi
 }
 
 /// Each file read in order. A required one must exist; an optional one is
-/// skipped when missing. One tracked by git is refused: its values would be
-/// in the repository's history.
+/// skipped when missing. One tracked by git is loaded with a warning: its
+/// values are in the repository's history.
 fn load_files(files: &[EnvFile], paths: &Paths) -> anyhow::Result<Vec<LoadedFile>> {
     let mut loaded = Vec::new();
     for file in files {
@@ -176,7 +175,12 @@ fn load_files(files: &[EnvFile], paths: &Paths) -> anyhow::Result<Vec<LoadedFile
             debug!("env file {} is missing; optional, skipped", path.display());
             continue;
         }
-        refuse_tracked(&path, paths.repo_root)?;
+        if path.starts_with(paths.repo_root) && crate::repo::is_tracked(&path) {
+            warn!(
+                "env file {} is tracked by git: its values are in the repository's history",
+                path.display()
+            );
+        }
         let vars = dotenvy::from_path_iter(&path)
             .and_then(|lines| lines.collect::<Result<Vec<_>, _>>())
             .with_context(|| format!("reading env file {}", path.display()))?;
@@ -184,30 +188,6 @@ fn load_files(files: &[EnvFile], paths: &Paths) -> anyhow::Result<Vec<LoadedFile
         loaded.push(LoadedFile { path, vars });
     }
     Ok(loaded)
-}
-
-fn refuse_tracked(path: &Path, repo_root: &Path) -> anyhow::Result<()> {
-    let Ok(inside) = path.strip_prefix(repo_root) else {
-        return Ok(());
-    };
-    let tracked = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(inside)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success());
-    if tracked {
-        bail!(
-            "env file {} is tracked by git, so its values are in the repository's history; \
-             untrack it with `git rm --cached {}` and add it to .gitignore",
-            path.display(),
-            inside.display()
-        );
-    }
-    Ok(())
 }
 
 /// `*` matches any run of characters, `?` any one. The configuration
@@ -219,6 +199,9 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 #[cfg(test)]
 #[allow(non_snake_case)] // unit__scenario__expected test names
 mod tests {
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -397,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn load_files__tracked_by_git__is_refused_naming_the_fix() {
+    fn load_files__tracked_by_git__loaded_with_a_warning() {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let status = Command::new("git")
@@ -423,8 +406,43 @@ mod tests {
             required: true,
         };
 
-        let error = load_files(&[file], &paths).unwrap_err().to_string();
+        let log = Log::default();
 
-        assert!(error.contains("git rm --cached .env"), "{error}");
+        let loaded = tracing::subscriber::with_default(log.subscriber(), || {
+            load_files(&[file], &paths).unwrap()
+        });
+
+        assert_eq!(loaded[0].vars, pairs(&[("SECRET", "1")]));
+        let log = log.text();
+        assert!(log.contains("is tracked by git"), "{log}");
+    }
+
+    /// What a subscriber logged, as text.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl Log {
+        fn subscriber(&self) -> impl tracing::Subscriber + use<> {
+            let log = self.clone();
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || log.clone())
+                .finish()
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

@@ -1,10 +1,15 @@
-//! Plans an image build from a Dockerfile. The tag carries a hash of the
-//! Dockerfile and its args, so an edit anywhere else in `vz.yml` never
-//! rebuilds, and neither does a change to a file the Dockerfile copies.
+//! Plans the image: a chain of pulls and builds, bottom first. The tag of a
+//! built image carries a hash of the Dockerfile and its args, so an edit
+//! anywhere else in `vz.yml` never rebuilds, and neither does a change to a
+//! file the Dockerfile copies.
 //!
 //! A Dockerfile that declares `ARG VZ_UID` (or any of the user's build args)
 //! gets the host user's value, so it can bake the user into the image; the
 //! values join the hash, so such images are built per user.
+//!
+//! A Dockerfile that declares `ARG BASE` stacks: it is built on the image the
+//! layers below it resolved to, passed as `BASE`, which joins its hash. One
+//! without it, or an image reference, replaces what is below.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,8 +18,8 @@ use anyhow::Context;
 use docker_wrapper::BuildCommand;
 use sha2::{Digest, Sha256};
 
-use crate::config::BuildSpec;
-use crate::constants::{BUILT_IMAGE_PREFIX, CONTENT_HASH_LEN, FALLBACK_IMAGE_NAME};
+use crate::config::{self, BuildSpec, ImageLayer, ImageSource};
+use crate::constants::{BASE_ARG, BUILT_IMAGE_PREFIX, CONTENT_HASH_LEN, FALLBACK_IMAGE_NAME};
 use crate::user::User;
 
 #[derive(Debug)]
@@ -26,34 +31,20 @@ pub struct BuildPlan {
 }
 
 impl BuildPlan {
-    /// Resolves the spec's paths against the folder of its `vz.yml`, reads the
-    /// Dockerfile, and adds the user's build args it declares; `vz.yml` args win.
-    pub fn load(
-        spec: &BuildSpec,
-        config_dir: &Path,
-        repo_dir_name: &str,
-        user: &User,
-    ) -> anyhow::Result<Self> {
-        let dockerfile = config_dir.join(&spec.dockerfile);
-        let dockerfile_text = std::fs::read_to_string(&dockerfile)
-            .with_context(|| format!("reading {}", dockerfile.display()))?;
-        let mut args = identity_args(&dockerfile_text, user);
-        args.extend(spec.args.clone());
-        let resolved = BuildSpec {
-            dockerfile,
-            context: config_dir.join(&spec.context),
-            args,
-        };
-        Ok(Self::new(&resolved, repo_dir_name, &dockerfile_text))
-    }
-
-    fn new(spec: &BuildSpec, repo_dir_name: &str, dockerfile_text: &str) -> Self {
+    /// `spec`'s args hold every build arg; the name comes from the
+    /// Dockerfile's folder.
+    fn new(spec: &BuildSpec, dockerfile_text: &str) -> Self {
         Self {
-            tag: image_tag(repo_dir_name, dockerfile_text, &spec.args),
+            tag: image_tag(&dir_name(&spec.dockerfile), dockerfile_text, &spec.args),
             dockerfile: spec.dockerfile.clone(),
             context: spec.context.clone(),
             args: spec.args.clone(),
         }
+    }
+
+    /// The image it is built on, when it stacks.
+    pub fn base(&self) -> Option<&str> {
+        self.args.get(BASE_ARG).map(String::as_str)
     }
 
     /// `docker build`, which sends the daemon only the files the build uses
@@ -66,6 +57,134 @@ impl BuildPlan {
             |command, (name, value)| command.build_arg(name, value),
         )
     }
+}
+
+/// One image of the chain: a reference to pull, or a Dockerfile to build.
+#[derive(Debug)]
+pub enum ImageStep {
+    Pull(String),
+    Build(BuildPlan),
+}
+
+impl ImageStep {
+    pub fn tag(&self) -> &str {
+        match self {
+            ImageStep::Pull(reference) => reference,
+            ImageStep::Build(plan) => &plan.tag,
+        }
+    }
+}
+
+/// The steps that make the image of `chain` (every `image:` of the layers,
+/// bottom first), bottom first; the last one's tag is the session's image.
+/// Paths resolve against `config_dir`; the Dockerfiles are read.
+pub fn plan(
+    chain: &[ImageSource],
+    config_dir: &Path,
+    user: &User,
+) -> anyhow::Result<Vec<ImageStep>> {
+    let loaded = chain
+        .iter()
+        .map(|source| match source {
+            ImageSource::Reference(reference) => Ok(Loaded::Reference(reference)),
+            ImageSource::Build(spec) => {
+                let dockerfile = config_dir.join(&spec.dockerfile);
+                let text = std::fs::read_to_string(&dockerfile)
+                    .with_context(|| format!("reading {}", dockerfile.display()))?;
+                let spec = BuildSpec {
+                    dockerfile,
+                    context: config_dir.join(&spec.context),
+                    args: spec.args.clone(),
+                };
+                Ok(Loaded::Build(spec, text))
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(stack(&loaded, user))
+}
+
+/// An `image:` of the chain, its Dockerfile read.
+enum Loaded<'a> {
+    Reference(&'a str),
+    /// Paths resolved; the Dockerfile's text.
+    Build(BuildSpec, String),
+}
+
+/// Walks the chain bottom-up: a reference, or a Dockerfile that does not
+/// stack, starts over; one that stacks gets `BASE`, the tag of the step
+/// below, when there is one. `vz.yml` args win over the user's and `BASE`
+/// alike: a `BASE` set there names the base, so the step starts over.
+fn stack(chain: &[Loaded], user: &User) -> Vec<ImageStep> {
+    let mut steps: Vec<ImageStep> = Vec::new();
+    for source in chain {
+        let step = match source {
+            Loaded::Reference(reference) => {
+                steps.clear();
+                ImageStep::Pull(config::with_default_tag(reference))
+            }
+            Loaded::Build(spec, text) => {
+                let mut args = identity_args(text, user);
+                let stacks = declares_base(text) && !spec.args.contains_key(BASE_ARG);
+                match steps.last() {
+                    Some(below) if stacks => {
+                        args.insert(BASE_ARG.to_owned(), below.tag().to_owned());
+                    }
+                    _ => steps.clear(),
+                }
+                args.extend(spec.args.clone());
+                let spec = BuildSpec {
+                    args,
+                    ..spec.clone()
+                };
+                ImageStep::Build(BuildPlan::new(&spec, text))
+            }
+        };
+        steps.push(step);
+    }
+    steps
+}
+
+/// Whether the Dockerfile declares `ARG BASE`, so it stacks on the image
+/// below it; an unreadable one does not.
+pub fn stacks(dockerfile: &Path) -> bool {
+    std::fs::read_to_string(dockerfile).is_ok_and(|text| declares_base(&text))
+}
+
+fn declares_base(dockerfile_text: &str) -> bool {
+    declared_args(dockerfile_text).contains(BASE_ARG)
+}
+
+/// One line per image of the chain, bottom first, with the cell that set it
+/// and what it does to the ones below: `debian:stable-slim (global default)`,
+/// `Dockerfile (repository default, ARG BASE: stacks)`, `gpu.Dockerfile
+/// (repository gpu, replaces)`. A Dockerfile in `repo_root` is named
+/// relative to it; others by `~/…` or in full.
+pub fn describe(chain: &[ImageLayer], repo_root: &Path, home: &Path) -> Vec<String> {
+    chain
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let (name, stacking) = match &image.source {
+                ImageSource::Reference(reference) => (reference.clone(), false),
+                ImageSource::Build(spec) => {
+                    let dockerfile = repo_root.join(&spec.dockerfile);
+                    let stacking = !spec.args.contains_key(BASE_ARG) && stacks(&dockerfile);
+                    let name = match dockerfile.strip_prefix(repo_root) {
+                        Ok(inside) => inside.display().to_string(),
+                        Err(_) => config::tilde(&dockerfile, home),
+                    };
+                    (name, stacking)
+                }
+            };
+            let cell = &image.cell;
+            match (index, stacking) {
+                (0, false) => format!("{name} ({cell})"),
+                (0, true) => format!("{name} ({cell}, ARG BASE: its default)"),
+                (_, false) => format!("{name} ({cell}, replaces)"),
+                (_, true) => format!("{name} ({cell}, ARG BASE: stacks)"),
+            }
+        })
+        .collect()
 }
 
 /// The user's build args that the Dockerfile declares.
@@ -91,23 +210,29 @@ fn declared_args(dockerfile_text: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-/// `vz-<repository directory>:<content hash>`.
-fn image_tag(
-    repo_dir_name: &str,
-    dockerfile_text: &str,
-    args: &BTreeMap<String, String>,
-) -> String {
+/// `vz-<the Dockerfile's folder>:<content hash>`.
+fn image_tag(dir_name: &str, dockerfile_text: &str, args: &BTreeMap<String, String>) -> String {
     format!(
         "{BUILT_IMAGE_PREFIX}{}:{}",
-        image_name(repo_dir_name),
+        image_name(dir_name),
         content_hash(dockerfile_text, args)
     )
 }
 
+/// The name of the folder the Dockerfile is in: one Dockerfile makes one
+/// image, whichever repository uses it.
+fn dir_name(dockerfile: &Path) -> String {
+    dockerfile
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// An image name allows lowercase letters, digits and inner separators;
 /// everything else becomes `-`.
-fn image_name(repo_dir_name: &str) -> String {
-    let name: String = repo_dir_name
+fn image_name(dir_name: &str) -> String {
+    let name: String = dir_name
         .to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -141,6 +266,7 @@ mod tests {
     use docker_wrapper::DockerCommand;
 
     use super::*;
+    use crate::config::{Cell, Config, ConfigFile, Layer};
 
     const DOCKERFILE: &str = "FROM alpine:3\n";
 
@@ -244,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn load__paths_relative_to_config_dir__vz_yml_args_win_over_identity() {
+    fn plan__paths_relative_to_config_dir__vz_yml_args_win_over_identity() {
         let config_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             config_dir.path().join("Dockerfile"),
@@ -257,11 +383,273 @@ mod tests {
             args: args(&[("VZ_UID", "4242")]),
         };
 
-        let plan = BuildPlan::load(&spec, config_dir.path(), "app", &sally()).unwrap();
+        let steps = plan(&[ImageSource::Build(spec)], config_dir.path(), &sally()).unwrap();
 
+        let [ImageStep::Build(plan)] = steps.as_slice() else {
+            panic!("{steps:?}");
+        };
         assert_eq!(plan.dockerfile, config_dir.path().join("Dockerfile"));
         assert_eq!(plan.context, config_dir.path().join("."));
         assert_eq!(plan.args, args(&[("VZ_UID", "4242")]));
+    }
+
+    #[test]
+    fn stacks__dockerfile__declares_arg_base_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("ARG BASE\nFROM ${BASE}\n", true),
+            ("ARG BASE=debian:stable-slim\nFROM ${BASE}\n", true),
+            ("arg BASE\nFROM ${BASE}\n", true),
+            ("FROM debian:stable-slim\n", false),
+            ("ARG OTHER\nFROM debian:stable-slim\n", false),
+        ];
+        for (text, expected) in cases {
+            let dockerfile = dir.path().join("Dockerfile");
+            std::fs::write(&dockerfile, text).unwrap();
+
+            assert_eq!(stacks(&dockerfile), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn stacks__no_dockerfile__false() {
+        assert!(!stacks(Path::new("/nonexistent/Dockerfile")));
+    }
+
+    const STACKING: &str = "ARG BASE=debian:stable-slim\nFROM ${BASE}\n";
+    const REPLACING: &str = "FROM debian:stable-slim\n";
+
+    /// A Dockerfile of the chain at `/repos/<dir>/Dockerfile`.
+    fn build(dir: &str, text: &str) -> Loaded<'static> {
+        let spec = BuildSpec {
+            dockerfile: PathBuf::from(format!("/repos/{dir}/Dockerfile")),
+            context: PathBuf::from(format!("/repos/{dir}")),
+            args: BTreeMap::new(),
+        };
+        Loaded::Build(spec, text.to_owned())
+    }
+
+    /// Each step as `pull <ref>` or `build <name> [on <base>]`.
+    fn shape(steps: &[ImageStep]) -> Vec<String> {
+        steps
+            .iter()
+            .map(|step| match step {
+                ImageStep::Pull(reference) => format!("pull {reference}"),
+                ImageStep::Build(plan) => {
+                    let (name, _) = plan.tag.split_once(':').unwrap();
+                    match plan.base() {
+                        Some(base) => format!("build {name} on {base}"),
+                        None => format!("build {name}"),
+                    }
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stack__chains__steps_that_contribute_bottom_first() {
+        let debian = || Loaded::Reference("debian");
+        let cases = [
+            (vec![debian()], vec!["pull debian:latest"]),
+            (
+                vec![debian(), build("tools", STACKING)],
+                vec!["pull debian:latest", "build vz-tools on debian:latest"],
+            ),
+            (
+                vec![debian(), build("alone", REPLACING)],
+                vec!["build vz-alone"],
+            ),
+            (vec![build("tools", STACKING)], vec!["build vz-tools"]),
+            (
+                vec![build("tools", STACKING), debian()],
+                vec!["pull debian:latest"],
+            ),
+            (
+                vec![
+                    build("base", REPLACING),
+                    build("tools", STACKING),
+                    build("alone", REPLACING),
+                ],
+                vec!["build vz-alone"],
+            ),
+        ];
+        for (chain, expected) in cases {
+            let steps = stack(&chain, &sally());
+
+            assert_eq!(shape(&steps), expected);
+        }
+    }
+
+    #[test]
+    fn stack__three_dockerfiles_stacking__each_on_the_previous_tag() {
+        let chain = [
+            build("base", REPLACING),
+            build("tools", STACKING),
+            build("agents", STACKING),
+        ];
+
+        let steps = stack(&chain, &sally());
+
+        let tags: Vec<&str> = steps.iter().map(ImageStep::tag).collect();
+        let bases: Vec<Option<&str>> = steps
+            .iter()
+            .map(|step| match step {
+                ImageStep::Build(plan) => plan.base(),
+                ImageStep::Pull(_) => panic!("{step:?}"),
+            })
+            .collect();
+        assert_eq!(bases, [None, Some(tags[0]), Some(tags[1])]);
+    }
+
+    #[test]
+    fn stack__base_dockerfile_edit__changes_the_top_tag() {
+        let top = |base_text: &str| {
+            let chain = [build("base", base_text), build("tools", STACKING)];
+            stack(&chain, &sally()).last().unwrap().tag().to_owned()
+        };
+
+        let before = top(REPLACING);
+
+        let after = top("FROM debian:stable-slim\nRUN true\n");
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn stack__base_set_in_vz_yml__replaces_what_is_below() {
+        let Loaded::Build(mut spec, text) = build("tools", STACKING) else {
+            unreachable!()
+        };
+        spec.args = args(&[("BASE", "alpine:3")]);
+        let chain = [Loaded::Reference("debian"), Loaded::Build(spec, text)];
+
+        let steps = stack(&chain, &sally());
+
+        assert_eq!(shape(&steps), ["build vz-tools on alpine:3"]);
+    }
+
+    #[test]
+    fn describe__chain__each_image_with_its_cell_and_what_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [("stacking", STACKING), ("replacing", REPLACING)] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let image = |profile: &str, source| ImageLayer {
+            cell: Cell {
+                owner: ConfigFile::Repository,
+                profile: profile.to_owned(),
+            },
+            source,
+        };
+        let build = |profile: &str, name: &str| {
+            let spec = BuildSpec {
+                dockerfile: PathBuf::from(name),
+                context: PathBuf::from("."),
+                args: BTreeMap::new(),
+            };
+            image(profile, ImageSource::Build(spec))
+        };
+        let chain = [
+            build("default", "stacking"),
+            image("a", ImageSource::Reference("debian".to_owned())),
+            build("b", "stacking"),
+            build("c", "replacing"),
+        ];
+
+        let lines = describe(&chain, dir.path(), Path::new("/home/sally"));
+
+        assert_eq!(
+            lines,
+            [
+                "stacking (repository default, ARG BASE: its default)",
+                "debian (repository a, replaces)",
+                "stacking (repository b, ARG BASE: stacks)",
+                "replacing (repository c, replaces)",
+            ]
+        );
+    }
+
+    #[test]
+    fn header__two_files_two_profiles__grid_then_images_in_fold_order() {
+        let home = tempfile::tempdir().unwrap();
+        let (global_dir, app) = (
+            home.path().join(".config/viz-shell"),
+            home.path().join("repos/app"),
+        );
+        let files = [
+            (global_dir.join("viz-shell.base.Dockerfile"), REPLACING),
+            (
+                global_dir.join("viz-shell.global.yml"),
+                "image: { dockerfile: viz-shell.base.Dockerfile }\n\
+                 profiles:\n  trusted: { privileges: { sudo: true } }\n",
+            ),
+            (app.join("Dockerfile"), STACKING),
+            (app.join("gpu.Dockerfile"), STACKING),
+            (
+                app.join("viz-shell.yml"),
+                "image: { dockerfile: Dockerfile }\n\
+                 profiles:\n  trusted: { share: { docker: true } }\n\
+                 \x20 gpu: { extends: trusted, image: { dockerfile: gpu.Dockerfile } }\n",
+            ),
+        ];
+        for (path, text) in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let load = |path: &Path| Layer::load(path, home.path(), &app).unwrap();
+        let config = Config::new(Some(load(&files[1].0)), Some(load(&files[4].0)), None).unwrap();
+        let default = [
+            "default: global, repository",
+            "image: ~/.config/viz-shell/viz-shell.base.Dockerfile (global default)",
+            "image: Dockerfile (repository default, ARG BASE: stacks)",
+        ];
+        let cases: [(Option<&str>, &[&str]); 3] = [
+            (None, &default),
+            (
+                Some("trusted"),
+                &[
+                    "default: global, repository",
+                    "trusted: global, repository",
+                    default[1],
+                    default[2],
+                ],
+            ),
+            (
+                Some("gpu"),
+                &[
+                    "default: global, repository",
+                    "trusted: global, repository",
+                    "gpu: repository",
+                    default[1],
+                    default[2],
+                    "image: gpu.Dockerfile (repository gpu, ARG BASE: stacks)",
+                ],
+            ),
+        ];
+        for (profile, expected) in cases {
+            let effective = config.effective(profile).unwrap();
+
+            let images = describe(&effective.images, &app, home.path());
+
+            let lines: Vec<String> = effective
+                .grid_lines()
+                .into_iter()
+                .chain(images.iter().map(|line| format!("image: {line}")))
+                .collect();
+            assert_eq!(lines, expected, "{profile:?}");
+        }
+    }
+
+    #[test]
+    fn dir_name__dockerfile_paths() {
+        let cases = [
+            ("/home/sally/repos/app/Dockerfile", "app"),
+            ("/home/sally/repos/app/images/tools/Dockerfile", "tools"),
+            ("/Dockerfile", ""),
+        ];
+        for (dockerfile, expected) in cases {
+            assert_eq!(dir_name(Path::new(dockerfile)), expected, "{dockerfile}");
+        }
     }
 
     #[test]
@@ -286,7 +674,7 @@ mod tests {
             context: PathBuf::from("ctx"),
             args: args(&[("BASE", "alpine"), ("USER", "sally")]),
         };
-        let plan = BuildPlan::new(&spec, "vz", DOCKERFILE);
+        let plan = BuildPlan::new(&spec, DOCKERFILE);
 
         let cli_args = plan.command().build_command_args();
 

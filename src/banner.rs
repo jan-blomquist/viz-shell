@@ -35,10 +35,13 @@ pub struct Session<'a> {
     pub home: &'a Path,
     pub repo_root: &'a Path,
     pub branch: Option<&'a str>,
-    /// The configuration files read, global first.
-    pub config_files: &'a [&'a Path],
+    /// The configuration files read, each with the file it is: global,
+    /// repository, local, in that order.
+    pub config_files: &'a [(ConfigFile, &'a Path)],
     pub profile: Option<&'a str>,
     pub image: &'a str,
+    /// The images it is built on, the nearest first.
+    pub image_bases: &'a [&'a str],
     pub shell: Option<&'a str>,
     pub sudo: bool,
     /// The host's docker socket, when shared.
@@ -65,25 +68,19 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
         true => "none".to_owned(),
         false => text,
     };
-    let file_names: Vec<String> = session
+    let file_names: Vec<(ConfigFile, String)> = session
         .config_files
         .iter()
-        .filter_map(|file| file.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
+        .filter_map(|(file, path)| Some((*file, path.file_name()?.to_string_lossy().into_owned())))
         .collect();
-    // The files are global first: one file alone is both first and last.
-    let file_name = |file: ConfigFile| match file {
-        ConfigFile::Global => file_names.first(),
-        ConfigFile::Repository => file_names.last(),
-    };
-    let per_file: Vec<(usize, &str)> = [ConfigFile::Global, ConfigFile::Repository]
-        .into_iter()
-        .filter_map(|file| {
-            let count = session.mounts.iter().filter(|m| m.file == file).count();
-            let name = file_name(file)?;
+    let per_file: Vec<(usize, &str)> = file_names
+        .iter()
+        .filter_map(|(file, name)| {
+            let count = session.mounts.iter().filter(|m| m.file == *file).count();
             (count > 0).then_some((count, name.as_str()))
         })
         .collect();
+    let file_names: Vec<&str> = file_names.iter().map(|(_, name)| name.as_str()).collect();
     let mounts = match per_file.as_slice() {
         [] => "none".to_owned(),
         [(count, name)] => format!("{count} ({name})"),
@@ -130,7 +127,13 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
     facts.extend([
         ("Config", or_none(file_names.join(", "))),
         ("Profile", session.profile.unwrap_or("none").to_owned()),
-        ("Image", session.image.to_owned()),
+        (
+            "Image",
+            match session.image_bases {
+                [] => session.image.to_owned(),
+                bases => format!("{} (on {})", session.image, bases.join(", ")),
+            },
+        ),
         (
             "Shell",
             session.shell.unwrap_or("bash (else sh)").to_owned(),
@@ -191,7 +194,7 @@ mod tests {
 
     use super::*;
 
-    fn session<'a>(mounts: &'a [HostMount], files: &'a [&'a Path]) -> Session<'a> {
+    fn session<'a>(mounts: &'a [HostMount], files: &'a [(ConfigFile, &'a Path)]) -> Session<'a> {
         Session {
             user: "sally",
             container: "vz-0-app",
@@ -203,6 +206,7 @@ mod tests {
             config_files: files,
             profile: Some("trusted"),
             image: "vz-app:0123456789abcdef",
+            image_bases: &[],
             shell: Some("fish"),
             sudo: true,
             docker: Some(Path::new("/run/user/1000/docker.sock")),
@@ -226,11 +230,18 @@ mod tests {
         }
     }
 
-    fn both_files() -> [&'static Path; 2] {
-        [
-            Path::new("/home/sally/.config/viz-shell/global.yml"),
-            Path::new("/home/sally/repos/app/viz-shell.yml"),
-        ]
+    /// A configuration file of the kind, under a typical name.
+    fn file(kind: ConfigFile) -> (ConfigFile, &'static Path) {
+        let path = match kind {
+            ConfigFile::Global => "/home/sally/.config/viz-shell/viz-shell.global.yml",
+            ConfigFile::Repository => "/home/sally/repos/app/viz-shell.yml",
+            ConfigFile::Local => "/home/sally/repos/app/viz-shell.local.yml",
+        };
+        (kind, Path::new(path))
+    }
+
+    fn both_files() -> [(ConfigFile, &'static Path); 2] {
+        [file(ConfigFile::Global), file(ConfigFile::Repository)]
     }
 
     #[test]
@@ -249,14 +260,14 @@ mod tests {
             ("Session", "new, ephemeral"),
             ("Repo", "~/repos/app"),
             ("Branch", "main"),
-            ("Config", "global.yml, viz-shell.yml"),
+            ("Config", "viz-shell.global.yml, viz-shell.yml"),
             ("Profile", "trusted"),
             ("Image", "vz-app:0123456789abcdef"),
             ("Shell", "fish"),
             ("Sudo", "yes"),
             ("Docker", "/run/user/1000/docker.sock"),
             ("Network", "bridge"),
-            ("Mounts", "3 (1 global.yml, 2 viz-shell.yml)"),
+            ("Mounts", "3 (1 viz-shell.global.yml, 2 viz-shell.yml)"),
             ("State", "2 paths in ~/repos/app/.vz_state"),
             ("Env", "1 variable"),
             ("Hooks", "2 create, 1 attach"),
@@ -356,6 +367,33 @@ mod tests {
     }
 
     #[test]
+    fn facts__image__top_then_its_bases_nearest_first() {
+        let cases: [(&[&str], &str); 3] = [
+            (&[], "vz-app:3f9c2a1b"),
+            (
+                &["debian:stable-slim"],
+                "vz-app:3f9c2a1b (on debian:stable-slim)",
+            ),
+            (
+                &["vz-tools:9a1c0d2e", "debian:stable-slim"],
+                "vz-app:3f9c2a1b (on vz-tools:9a1c0d2e, debian:stable-slim)",
+            ),
+        ];
+        for (image_bases, expected) in cases {
+            let session = Session {
+                image: "vz-app:3f9c2a1b",
+                image_bases,
+                ..session(&[], &[])
+            };
+
+            let facts = facts(&session);
+
+            let (_, value) = facts.iter().find(|(key, _)| *key == "Image").unwrap();
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
     fn facts__host_network__host() {
         let session = Session {
             host_network: true,
@@ -369,17 +407,63 @@ mod tests {
     }
 
     #[test]
-    fn facts__mounts_from_one_file__count_and_that_file() {
-        let mounts = [
-            mount("/home/sally/repos", ConfigFile::Repository),
-            mount("/etc/hosts", ConfigFile::Repository),
+    fn facts__config_and_mounts__named_by_the_file_that_set_them() {
+        use ConfigFile::{Global, Local, Repository};
+        let cases: [(&[ConfigFile], &[ConfigFile], &str, &str); 6] = [
+            (
+                &[Global],
+                &[Global],
+                "viz-shell.global.yml",
+                "1 (viz-shell.global.yml)",
+            ),
+            (
+                &[Repository],
+                &[Repository],
+                "viz-shell.yml",
+                "1 (viz-shell.yml)",
+            ),
+            (
+                &[Global, Repository],
+                &[Repository, Repository],
+                "viz-shell.global.yml, viz-shell.yml",
+                "2 (viz-shell.yml)",
+            ),
+            (
+                &[Repository, Local],
+                &[Local],
+                "viz-shell.yml, viz-shell.local.yml",
+                "1 (viz-shell.local.yml)",
+            ),
+            (
+                &[Global, Repository, Local],
+                &[Global, Local],
+                "viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml",
+                "2 (1 viz-shell.global.yml, 1 viz-shell.local.yml)",
+            ),
+            (
+                &[Global, Repository, Local],
+                &[Global, Repository, Local],
+                "viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml",
+                "3 (1 viz-shell.global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)",
+            ),
         ];
-        let files = both_files();
+        for (files, mounted_by, expected_config, expected_mounts) in cases {
+            let files: Vec<(ConfigFile, &Path)> = files.iter().copied().map(file).collect();
+            let mounts: Vec<HostMount> = mounted_by
+                .iter()
+                .enumerate()
+                .map(|(i, kind)| mount(&format!("/home/sally/m{i}"), *kind))
+                .collect();
 
-        let facts = facts(&session(&mounts, &files));
+            let facts = facts(&session(&mounts, &files));
 
-        let (_, value) = facts.iter().find(|(key, _)| *key == "Mounts").unwrap();
-        assert_eq!(value, "2 (viz-shell.yml)");
+            let value = |key: &str| {
+                let (_, value) = facts.iter().find(|(k, _)| *k == key).unwrap();
+                value.as_str()
+            };
+            assert_eq!(value("Config"), expected_config);
+            assert_eq!(value("Mounts"), expected_mounts, "{expected_config}");
+        }
     }
 
     #[test]

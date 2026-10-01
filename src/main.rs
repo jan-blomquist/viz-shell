@@ -22,14 +22,14 @@ use clap::Parser;
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::build::BuildPlan;
+use crate::build::ImageStep;
 use crate::cli::{Action, Cli};
-use crate::config::{Config, ImageSource, Layer};
+use crate::config::{Config, ConfigFile, Layer};
 use crate::constants::{
-    CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR, DOCKER_HOST_ENV,
-    ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILE, GROUP_ENV, GROUPS_ENV,
-    HOME_ENV, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV,
-    REPO_CONFIG_FILES, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
+    BASE_DOCKERFILE, CONTAINER_ENV, CONTAINER_PROFILE_ENV, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR,
+    DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GLOBAL_CONFIG_DIR, GLOBAL_CONFIG_FILES, GROUP_ENV,
+    GROUPS_ENV, HOME_ENV, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LOG_ENV, MOUNTINFO_FILE,
+    PASSTHROUGH_ENV, REPO_CONFIG_FILES, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
@@ -75,36 +75,47 @@ struct Loaded {
     user: User,
     global_file: Option<PathBuf>,
     repo_file: Option<PathBuf>,
+    local_file: Option<PathBuf>,
     config: Config,
 }
 
 impl Loaded {
-    /// `# global …, repo …`: the files read.
+    /// The files read, each with its origin: global, repo, local, in that order.
+    fn files(&self) -> Vec<(ConfigFile, &Path)> {
+        [
+            (ConfigFile::Global, &self.global_file),
+            (ConfigFile::Repository, &self.repo_file),
+            (ConfigFile::Local, &self.local_file),
+        ]
+        .into_iter()
+        .filter_map(|(file, path)| Some((file, path.as_deref()?)))
+        .collect()
+    }
+
+    /// `# global …, repo …, local …`: the files read.
     fn files_line(&self) -> String {
-        let files: Vec<String> = [("global", &self.global_file), ("repo", &self.repo_file)]
+        let files: Vec<String> = self
+            .files()
             .into_iter()
-            .filter_map(|(origin, file)| Some(format!("{origin} {}", file.as_ref()?.display())))
+            .map(|(file, path)| format!("{} {}", file.origin(), path.display()))
             .collect();
         files.join(", ")
     }
 }
 
 /// Reads the global configuration and the repository's, either optional
-/// but not both. `-c` names the repository's.
+/// but not both, then your local overlay of the repository's, if any. `-c`
+/// names the repository's; its overlay is next to it.
 fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
     let repo_root = repo::root()?;
     let user = User::of_host()?;
     debug!("host user: {user:?}");
-    let global_path = global_config_file()?;
-    match config::scaffold_global(&global_path) {
-        Ok(true) => info!(
-            "wrote the default global configuration to {}: edit it to taste",
-            global_path.display()
-        ),
-        Ok(false) => {}
-        Err(error) => warn!("no global configuration: {error:#}"),
-    }
-    let global_file = Some(global_path.clone()).filter(|file| file.is_file());
+    let global_dir = global_config_dir()?;
+    let global_path = global_dir.join(GLOBAL_CONFIG_FILES[0]);
+    let global_file = config::global_config_file(&global_dir).or_else(|| {
+        scaffold_global(&global_dir, &global_path);
+        Some(global_path.clone()).filter(|file| file.is_file())
+    });
     let repo_file = match config_file {
         Some(file) => Some(
             std::path::absolute(file).with_context(|| format!("resolving {}", file.display()))?,
@@ -117,39 +128,77 @@ fn load_with(config_file: Option<&Path>) -> anyhow::Result<Loaded> {
         REPO_CONFIG_FILES.join(", "),
         global_path.display()
     );
+    let local_file = match config_file {
+        Some(_) => repo_file
+            .as_deref()
+            .map(repo::local_file_for)
+            .filter(|file| file.is_file()),
+        None => repo::local_config_file(&repo_root),
+    };
+    if let Some(file) = &local_file
+        && repo::is_tracked(file)
+    {
+        let name = file.file_name().unwrap_or_default().to_string_lossy();
+        warn!("{name} is tracked by git: it is meant to be personal");
+    }
     let read = |file: &Option<PathBuf>| {
         file.as_deref()
             .map(|file| Layer::load(file, &user.home, &repo_root))
             .transpose()
     };
-    let config = Config::new(read(&global_file)?, read(&repo_file)?)?;
+    let config = Config::new(read(&global_file)?, read(&repo_file)?, read(&local_file)?)?;
     Ok(Loaded {
         repo_root,
         user,
         global_file,
         repo_file,
+        local_file,
         config,
     })
 }
 
-/// `$XDG_CONFIG_HOME/viz-shell/global.yml`, or under `~/.config` without it.
-fn global_config_file() -> anyhow::Result<PathBuf> {
+/// `$XDG_CONFIG_HOME/viz-shell`, or `~/.config/viz-shell` without it.
+fn global_config_dir() -> anyhow::Result<PathBuf> {
     use etcetera::BaseStrategy;
     let strategy = etcetera::choose_base_strategy().context("finding your home folder")?;
-    Ok(strategy
-        .config_dir()
-        .join(GLOBAL_CONFIG_DIR)
-        .join(GLOBAL_CONFIG_FILE))
+    Ok(strategy.config_dir().join(GLOBAL_CONFIG_DIR))
 }
 
-/// Each profile: the files that define it, what it extends and changes;
-/// then the configuration files read.
+/// A first run: writes the default global configuration to `path`, and the
+/// base Dockerfile it builds next to it, unless there. A failure leaves vz
+/// without a global configuration, never stopped.
+fn scaffold_global(dir: &Path, path: &Path) {
+    match config::scaffold_global(path) {
+        Ok(true) => info!(
+            "wrote the default global configuration to {}: edit it to taste",
+            path.display()
+        ),
+        Ok(false) => return,
+        Err(error) => {
+            warn!("no global configuration: {error:#}");
+            return;
+        }
+    }
+    let dockerfile = dir.join(BASE_DOCKERFILE);
+    match config::scaffold_base_dockerfile(&dockerfile) {
+        Ok(true) => info!(
+            "wrote the base image's Dockerfile to {}",
+            dockerfile.display()
+        ),
+        Ok(false) => {}
+        Err(error) => warn!("no base Dockerfile: {error:#}"),
+    }
+}
+
+/// Each profile, `default` first: the owners that define it, what it
+/// extends and changes; then the configuration files read.
 fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
     let profiles = loaded.config.profiles();
     if profiles.is_empty() {
-        println!("No profiles yet: add them under `profiles:` in either file.");
+        println!("No profiles yet: add them under `profiles:` in any file.");
     } else {
-        let rows = profiles.into_iter().map(|profile| {
+        let profiles = std::iter::once(loaded.config.default_profile()).chain(profiles);
+        let rows = profiles.map(|profile| {
             [
                 profile.name,
                 profile.defined_in.join(", "),
@@ -159,15 +208,16 @@ fn print_profiles(loaded: &Loaded) -> anyhow::Result<()> {
                     .unwrap_or_else(|| "-".to_owned()),
             ]
         });
-        print_table(["PROFILE", "FROM", "EXTENDS", "CHANGES"], rows);
+        print_table(["PROFILE", "OWNERS", "EXTENDS", "CHANGES"], rows);
     }
     println!();
-    let files = [("global", &loaded.global_file), ("repo", &loaded.repo_file)];
-    let rows = files.into_iter().filter_map(|(origin, file)| {
-        let file = file.as_ref()?;
-        Some([origin.to_owned(), config::tilde(file, &loaded.user.home)])
+    let rows = loaded.files().into_iter().map(|(file, path)| {
+        [
+            file.origin().to_owned(),
+            config::tilde(path, &loaded.user.home),
+        ]
     });
-    print_table(["FROM", "FILE"], rows);
+    print_table(["OWNER", "FILE"], rows);
     Ok(())
 }
 
@@ -214,23 +264,27 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         .config
         .effective(profile)
         .context("in the configuration")?;
-    let header = format!(
-        "{}; layers: {}",
-        loaded.files_line(),
-        config.layers.join(", ")
-    );
+    let layers: Vec<String> = config.layers.iter().map(ToString::to_string).collect();
+    let header = format!("{}; layers: {}", loaded.files_line(), layers.join(", "));
     if cli.show_effective_config {
-        println!("# effective configuration of {header}");
+        println!("# effective configuration of {}", loaded.files_line());
+        for line in config.grid_lines() {
+            println!("# {line}");
+        }
+        for line in build::describe(&config.images, &loaded.repo_root, &loaded.user.home) {
+            println!("# image: {line}");
+        }
         print!("{}", config.to_yaml()?);
         return Ok(0);
     }
     debug!("effective configuration: {config:?}");
+    let config_files: Vec<(ConfigFile, PathBuf)> = loaded
+        .files()
+        .into_iter()
+        .map(|(file, path)| (file, path.to_owned()))
+        .collect();
     let Loaded {
-        repo_root,
-        user,
-        global_file,
-        repo_file,
-        ..
+        repo_root, user, ..
     } = loaded;
     // Paths are absolute by now; the repository root is the base of the rest.
     let config_dir = repo_root.clone();
@@ -311,43 +365,44 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         env_names: &env_names,
         command,
     };
-    let show_banner = |container: &str, image: &str, attached: bool, persistent: bool| {
-        if !(config.banner && command.is_empty() && tty) {
-            return;
-        }
-        let branch = repo::branch(&repo_root);
-        let config_files: Vec<&Path> = [&global_file, &repo_file]
-            .into_iter()
-            .flatten()
-            .map(PathBuf::as_path)
-            .collect();
-        let facts = banner::Session {
-            user: &user.name,
-            container,
-            attached,
-            persistent,
-            home: &user.home,
-            repo_root: &repo_root,
-            branch: branch.as_deref(),
-            config_files: &config_files,
-            profile,
-            image,
-            shell: config.shell.as_deref(),
-            sudo: config.privileges.sudo,
-            docker: docker.as_ref().map(|socket| socket.path.as_path()),
-            host_network: config.share.host_network,
-            mounts: &mounts,
-            state_paths: state.len(),
-            state_dir: &state_dir,
-            env_vars: environment.len(),
-            create_hooks: config.hooks.create.len(),
-            attach_hooks: config.hooks.attach.len(),
+    let show_banner =
+        |container: &str, image: &str, image_bases: &[&str], attached: bool, persistent: bool| {
+            if !(config.banner && command.is_empty() && tty) {
+                return;
+            }
+            let branch = repo::branch(&repo_root);
+            let config_files: Vec<(ConfigFile, &Path)> = config_files
+                .iter()
+                .map(|(file, path)| (*file, path.as_path()))
+                .collect();
+            let facts = banner::Session {
+                user: &user.name,
+                container,
+                attached,
+                persistent,
+                home: &user.home,
+                repo_root: &repo_root,
+                branch: branch.as_deref(),
+                config_files: &config_files,
+                profile,
+                image,
+                image_bases,
+                shell: config.shell.as_deref(),
+                sudo: config.privileges.sudo,
+                docker: docker.as_ref().map(|socket| socket.path.as_path()),
+                host_network: config.share.host_network,
+                mounts: &mounts,
+                state_paths: state.len(),
+                state_dir: &state_dir,
+                env_vars: environment.len(),
+                create_hooks: config.hooks.create.len(),
+                attach_hooks: config.hooks.attach.len(),
+            };
+            anstream::print!(
+                "{}",
+                banner::render(&banner::title(&facts), &banner::facts(&facts))
+            );
         };
-        anstream::print!(
-            "{}",
-            banner::render(&banner::title(&facts), &banner::facts(&facts))
-        );
-    };
     let values: Vec<(String, String)> = environment
         .iter()
         .map(|(name, var)| (name.clone(), var.value.clone()))
@@ -368,6 +423,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
         show_banner(
             &container.name,
             &container.image,
+            &[],
             true,
             container.persistent,
         );
@@ -376,7 +432,11 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
 
     state::create_sources(&state)?;
     mounts::create_points_in_state(&mounts)?;
-    let image = prepare_image(&engine, &config.image, &config_dir, &repo_root, &user).await?;
+    let steps = build::plan(&config.image_sources(), &config_dir, &user)?;
+    prepare_image(&engine, &steps).await?;
+    let (top, below) = steps.split_last().expect("an image chain has a top");
+    let image = top.tag().to_owned();
+    let image_bases: Vec<&str> = below.iter().rev().map(ImageStep::tag).collect();
     let session_name = match how {
         Launch::New(name) => Some(name),
         _ => None,
@@ -425,10 +485,10 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     };
     if config.persistent {
         engine.start(&name).await?;
-        show_banner(&name, &image, false, true);
+        show_banner(&name, &image, &image_bases, false, true);
         engine.exec(enter(&name).args(), &values).await
     } else {
-        show_banner(&name, &image, false, false);
+        show_banner(&name, &image, &image_bases, false, false);
         engine.start_attached(&name).await
     }
 }
@@ -542,31 +602,27 @@ fn print_env(header: &str, environment: &env::Environment) {
     );
 }
 
-/// Pulls or builds the image unless the engine already has it, and returns
-/// its reference.
-async fn prepare_image(
-    engine: &Engine,
-    source: &ImageSource,
-    config_dir: &Path,
-    repo_root: &Path,
-    user: &User,
-) -> anyhow::Result<String> {
-    let (image, plan) = match source {
-        ImageSource::Reference(reference) => (config::with_default_tag(reference), None),
-        ImageSource::Build(spec) => {
-            let plan = BuildPlan::load(spec, config_dir, &repo::dir_name(repo_root), user)?;
-            (plan.tag.clone(), Some(plan))
+/// Makes the top image of the chain unless the engine has it: builds each
+/// image below it the engine lacks, bottom first, then the top; pulls the
+/// top when it is a reference. A build pulls what it stands on itself.
+async fn prepare_image(engine: &Engine, steps: &[ImageStep]) -> anyhow::Result<()> {
+    let (top, below) = steps.split_last().expect("an image chain has a top");
+    if engine.has_image(top.tag()).await {
+        debug!("image {} is present", top.tag());
+        return Ok(());
+    }
+    for step in below {
+        if let ImageStep::Build(plan) = step {
+            match engine.has_image(&plan.tag).await {
+                true => debug!("image {} is present", plan.tag),
+                false => engine.build(plan).await?,
+            }
         }
-    };
-    if engine.has_image(&image).await {
-        debug!("image {image} is present");
-        return Ok(image);
     }
-    match plan {
-        Some(plan) => engine.build(&plan).await?,
-        None => engine.pull(&image).await?,
+    match top {
+        ImageStep::Pull(reference) => engine.pull(reference).await,
+        ImageStep::Build(plan) => engine.build(plan).await,
     }
-    Ok(image)
 }
 
 fn passthrough_env() -> Vec<(String, String)> {

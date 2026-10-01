@@ -16,7 +16,8 @@ pub struct Cli {
     #[arg(short = 'c', long, global = true)]
     pub config_file: Option<PathBuf>,
 
-    /// A profile from vz.yml, applied on top of its root
+    /// A profile from any configuration file, applied on top of the default
+    /// (the top-level keys), after the profiles it extends
     #[arg(long, env = PROFILE_ENV, global = true)]
     pub profile: Option<String>,
 
@@ -73,7 +74,7 @@ pub enum Action {
         #[arg(long, conflicts_with = "targets")]
         all: bool,
     },
-    /// List the profiles of the global and the repository configuration
+    /// List the profiles of the global, repository and local configuration
     Profiles,
     /// Inside the container: add the host user, then run the command as it,
     /// or hold for shells to attach
