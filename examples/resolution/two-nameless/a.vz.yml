@@ -1,0 +1,2 @@
+# Nameless: the repository's default, but for b.vz.yml.
+image: debian:stable-slim

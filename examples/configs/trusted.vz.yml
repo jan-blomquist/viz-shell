@@ -1,0 +1,8 @@
+# The repository's `trusted`. A configuration never extends itself, so
+# `trusted` here names the library's: vz-debian-trixie, the library's trusted,
+# then this.
+name: trusted
+extends: trusted
+env:
+  defaults:
+    WHO: repo-trusted

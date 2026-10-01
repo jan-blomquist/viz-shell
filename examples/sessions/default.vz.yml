@@ -1,0 +1,19 @@
+# Sessions: every container is named vz-<index>-<repository>, its hostname too,
+# and labeled with its repository and configuration. `vz ls` lists them, `vz attach`
+# joins one, `vz new NAME` names one, `vz kill` removes them.
+name: default
+image: debian:stable-slim
+
+---
+# The container outlives the shell that created it; shells attach to it.
+name: kept
+extends: default
+persistent: true
+
+---
+# And `vz new` without a name, or `vz -- COMMAND`, joins it rather than
+# creating another.
+name: shared
+extends: default
+persistent: true
+attach: true

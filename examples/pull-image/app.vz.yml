@@ -1,0 +1,4 @@
+# The smallest configuration: pull an image and open a shell in it, as you,
+# with the repository mounted at its host path. It has no `name:`: a
+# repository's one nameless configuration is its `default`.
+image: debian:stable-slim

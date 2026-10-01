@@ -1,50 +1,27 @@
 use crate::config::MountMode;
 
-/// The repository's configuration file at the git root: the first of these
-/// present is used; others present are ignored, with a warning.
-pub const REPO_CONFIG_FILES: [&str; 4] = ["viz-shell.yml", "viz-shell.yaml", "vz.yml", "vz.yaml"];
+/// What ends a configuration file's name: `dev.vz.yml`. Nothing else is
+/// read from a folder.
+pub const CONFIG_FILE_SUFFIXES: [&str; 2] = [".vz.yml", ".vz.yaml"];
+/// The one short name read as well: a repository's plain `vz.yml`.
+pub const SHORT_CONFIG_FILE: &str = "vz.yml";
 
-/// Your own overlay of the repository's configuration, never checked in:
-/// each of `REPO_CONFIG_FILES` with `.local` before its extension, found
-/// by the same rule.
-pub const LOCAL_CONFIG_FILES: [&str; 4] = [
-    "viz-shell.local.yml",
-    "viz-shell.local.yaml",
-    "vz.local.yml",
-    "vz.local.yaml",
-];
+/// The library: `$XDG_CONFIG_HOME/viz-shell`, or `~/.config/viz-shell`
+/// without it. Configurations a repository extends by name.
+pub const LIBRARY_DIR: &str = "viz-shell";
 
-/// Inserted before a configuration file's extension to name its local overlay.
-pub const LOCAL_SUFFIX: &str = "local";
+/// The library's one template, which a first run writes: its name, its file,
+/// and the Dockerfile it builds.
+pub const LIBRARY_BASE: &str = "vz-debian-trixie";
+pub const LIBRARY_BASE_FILE: &str = "vz-debian-trixie.vz.yml";
+pub const LIBRARY_BASE_DOCKERFILE: &str = "vz-debian-trixie.Dockerfile";
 
-/// The global configuration's folder: `$XDG_CONFIG_HOME/viz-shell`, or
-/// `~/.config/viz-shell` without it.
-pub const GLOBAL_CONFIG_DIR: &str = "viz-shell";
+/// The configuration `vz` runs without `-c`: the repository's. The name of a
+/// scope's one nameless configuration.
+pub const DEFAULT_CONFIG: &str = "default";
 
-/// The global configuration in its folder, by the same rule as
-/// `REPO_CONFIG_FILES`; a first run writes the first. What every repository
-/// starts from.
-pub const GLOBAL_CONFIG_FILES: [&str; 4] = [
-    "viz-shell.global.yml",
-    "viz-shell.global.yaml",
-    "vz.global.yml",
-    "vz.global.yaml",
-];
-
-/// The global configuration's former name, still read when none of
-/// `GLOBAL_CONFIG_FILES` is present.
-pub const LEGACY_GLOBAL_CONFIG_FILE: &str = "global.yml";
-
-/// The base image's Dockerfile, written next to the global configuration on
-/// a first run; the default global configuration builds it.
-pub const BASE_DOCKERFILE: &str = "viz-shell.base.Dockerfile";
-
-/// The profile every run applies: each file's top-level keys. Not a name a
-/// profile may take.
-pub const DEFAULT_PROFILE: &str = "default";
-
-/// Selects a profile when `--profile` is not given; CI sets it once.
-pub const PROFILE_ENV: &str = "VZ_PROFILE";
+/// Selects a configuration when `-c` is not given; CI sets it once.
+pub const CONFIG_ENV: &str = "VZ_CONFIG";
 
 /// Our own variable rather than `RUST_LOG`, which the repository's
 /// tools may set for themselves.
@@ -92,9 +69,17 @@ pub const CONTAINER_PREFIX: &str = "vz-";
 pub const REPO_LABEL: &str = "vz.repo";
 pub const INDEX_LABEL: &str = "vz.index";
 pub const NAME_LABEL: &str = "vz.name";
-pub const PROFILE_LABEL: &str = "vz.profile";
-pub const PERSISTENT_LABEL: &str = "vz.persistent";
 pub const CONFIG_LABEL: &str = "vz.config";
+pub const PERSISTENT_LABEL: &str = "vz.persistent";
+/// A hash of the effective configuration it was created with.
+pub const CONFIG_HASH_LABEL: &str = "vz.config_hash";
+/// The configuration chain it was created with, `<config>@<file>` per step
+/// in fold order, and its image chain, tags bottom first; each joined by `,`.
+pub const CHAIN_LABEL: &str = "vz.chain";
+pub const IMAGE_LABEL: &str = "vz.image";
+
+/// The longest label vz writes, in bytes.
+pub const MAX_LABEL_LEN: usize = 4096;
 
 /// The secure floor: every capability dropped but these, which only the
 /// container's root processes use. The entrypoint gives folders to the user,
@@ -182,9 +167,10 @@ pub const REPO_ENV: &str = "VZ_REPO";
 /// the container. Marks the create hooks as claimed, then as run.
 pub const CREATED_DIR: &str = "/var/lib/viz-shell";
 
-/// Where the shell is: the container's name, and the profile it runs, when one.
+/// Where the shell is: the container's name, and the configuration it runs,
+/// when one.
 pub const CONTAINER_ENV: &str = "VZ_CONTAINER";
-pub const CONTAINER_PROFILE_ENV: &str = "VZ_CONTAINER_PROFILE";
+pub const CONTAINER_CONFIG_ENV: &str = "VZ_CONTAINER_CONFIG";
 
 /// Where state is kept unless `state_dir` says otherwise: this folder at the
 /// git root. Each state path is stored under it at its container path.

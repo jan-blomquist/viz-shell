@@ -1,0 +1,18 @@
+# Image stacking along the configuration chain: a Dockerfile that declares
+# `ARG BASE` is built on the image of the configurations before it; one
+# without it, or an image reference, replaces.
+name: default
+image:
+  dockerfile: base.Dockerfile
+
+---
+# The default's base, then tools on it.
+name: tools
+extends: default
+image: { dockerfile: tools.Dockerfile }
+
+---
+# Alone only.
+name: alone
+extends: default
+image: { dockerfile: alone.Dockerfile }

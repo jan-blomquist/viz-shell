@@ -1,0 +1,4 @@
+# Joe's configuration: the default, with the banner above his shell.
+name: joe
+extends: default
+banner: true

@@ -1,0 +1,4 @@
+# Extends tools: base, tools on it, then alone replaces both.
+name: deep
+extends: tools
+image: { dockerfile: alone.Dockerfile }

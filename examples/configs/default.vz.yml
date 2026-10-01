@@ -1,0 +1,30 @@
+# The repository's default, then more configurations as further documents,
+# chosen with `vz new -c NAME` or VZ_CONFIG=NAME. Each names the configuration
+# it extends; an entry with the same path updates the earlier one in its
+# place; `enabled: false` removes one.
+name: default
+image: debian:stable-slim
+state_dir: .vz_state
+mounts:
+  - ~/repos
+
+---
+# The same mount, now read-write.
+name: writable
+extends: default
+mounts:
+  - ~/repos:rw
+
+---
+# The mount removed.
+name: isolated
+extends: default
+mounts:
+  - { path: ~/repos, enabled: false }
+
+---
+# The default, plus a scratch folder that survives.
+name: scratch
+extends: default
+state:
+  - ~/scratch

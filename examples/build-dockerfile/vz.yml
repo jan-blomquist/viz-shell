@@ -1,6 +1,0 @@
-# Build the image from the repository's Dockerfile. It is built once per
-# content of the Dockerfile and args; editing either rebuilds.
-image:
-  dockerfile: Dockerfile
-  args:
-    DEBIAN_RELEASE: stable-slim

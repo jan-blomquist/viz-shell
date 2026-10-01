@@ -62,7 +62,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unix_socket_path__endpoints() {
+    fn unix_socket_path__unix_endpoint__its_socket_path() {
         let accepted = [
             ("unix:///var/run/docker.sock", "/var/run/docker.sock"),
             (
@@ -71,26 +71,30 @@ mod tests {
             ),
         ];
         for (endpoint, expected) in accepted {
-            assert_eq!(
-                unix_socket_path(endpoint).unwrap(),
-                PathBuf::from(expected),
-                "endpoint: {endpoint:?}"
-            );
+            let path = unix_socket_path(endpoint).unwrap();
+
+            assert_eq!(path, PathBuf::from(expected), "endpoint: {endpoint:?}");
         }
     }
 
     #[test]
     fn unix_socket_path__remote_endpoint__is_refused_naming_it() {
         let refused = [
-            "tcp://10.0.0.1:2375",
-            "ssh://sally@build-host",
-            "unix://",
-            "",
+            (
+                "tcp://10.0.0.1:2375",
+                "the docker endpoint is `tcp://10.0.0.1:2375`",
+            ),
+            (
+                "ssh://sally@build-host",
+                "the docker endpoint is `ssh://sally@build-host`",
+            ),
+            ("unix://", "the docker endpoint is `unix://`"),
+            ("", "the docker endpoint is ``"),
         ];
-        for endpoint in refused {
+        for (endpoint, expected) in refused {
             let error = unix_socket_path(endpoint).unwrap_err().to_string();
 
-            assert!(error.contains(&format!("`{endpoint}`")), "{error}");
+            assert!(error.contains(expected), "{error}");
         }
     }
 

@@ -232,14 +232,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exit_code__exits_and_signals() {
+    fn exit_code__exit_or_signal__its_code_or_128_plus_the_signal() {
+        const EXITED_0: i32 = 0;
+        const EXITED_3: i32 = 3 << 8;
+        const KILLED_BY_SIGKILL: i32 = 9;
         let cases = [
-            (ExitStatus::from_raw(0), 0),
-            (ExitStatus::from_raw(3 << 8), 3),
-            (ExitStatus::from_raw(9), 137),
+            ("exited 0", ExitStatus::from_raw(EXITED_0), 0),
+            ("exited 3", ExitStatus::from_raw(EXITED_3), 3),
+            (
+                "killed by SIGKILL",
+                ExitStatus::from_raw(KILLED_BY_SIGKILL),
+                137,
+            ),
         ];
-        for (status, expected) in cases {
-            assert_eq!(exit_code(status), expected, "status: {status:?}");
+        for (case, status, expected) in cases {
+            let code = exit_code(status);
+
+            assert_eq!(code, expected, "{case}");
         }
     }
 

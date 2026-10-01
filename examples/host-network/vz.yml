@@ -1,9 +1,0 @@
-# The host's network stack: its localhost and its ports, instead of docker's
-# own network. Without it the shell still reaches the internet, through
-# docker's network, but not the host's localhost.
-image: debian:stable-slim
-
-profiles:
-  trusted:
-    share:
-      host_network: true

@@ -1,0 +1,4 @@
+# Extends nothing: tools.Dockerfile with nothing below builds on its ARG BASE
+# default. A configuration's image holds only what it extends.
+name: bare-tools
+image: { dockerfile: tools.Dockerfile }

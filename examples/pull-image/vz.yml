@@ -1,3 +1,0 @@
-# The smallest vz.yml: pull an image and open a shell in it, as you,
-# with the repository mounted at its host path.
-image: debian:stable-slim

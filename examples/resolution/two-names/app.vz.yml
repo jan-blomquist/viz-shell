@@ -1,0 +1,3 @@
+# `extends` takes one name: two are refused.
+image: debian:stable-slim
+extends: [default, trusted]

@@ -1,0 +1,4 @@
+# A cheap stand-in for the library's template, as this example's test writes
+# it into its throwaway home.
+name: vz-debian-trixie
+image: debian:stable-slim

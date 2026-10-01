@@ -27,7 +27,7 @@
 ```console
 $ whoami
 sally
-$ vz
+$ vz new
 sally@vz-0-app:~/repos/app$ whoami
 sally
 ```
@@ -41,14 +41,14 @@ a CI runner, for you and for the agents working beside you.
 
 ## Why vz
 
-- **Your repo, mounted.** `cd` into any git repository and type `vz`. The repository is there,
+- **Your repo, mounted.** `cd` into any git repository and type `vz new`. The repository is there,
   read-write, at the same path as on your host.
 - **You, inside.** Same user, uid, groups, home and paths. Files you create stay yours; git and ssh
   just work; paths in errors match your editor's.
 - **Any image.** Official images work unchanged, or `vz` builds the repository's own Dockerfile.
   Switch branches, switch environments; nothing rebuilds needlessly.
-- **Profiles.** Your defaults in one global file, the project's in the repository, modes on top:
-  `vz --profile trusted` for sudo and docker, `ci` for the pipeline.
+- **Configurations.** Yours in a library, the project's in the repository, chained by `extends`:
+  `vz new -c trusted` for sudo and docker, `ci` for the pipeline.
 - **Secure by default, made for agents.** No Linux capabilities, no sudo, no docker, no host network,
   no secrets, unless you grant them. Let an agent loose: of your machine, it reaches the repository
   and nothing else.
@@ -69,35 +69,47 @@ git clone https://github.com/jan-blomquist/viz-shell && cd viz-shell
 just build && just install         # ~/.local/bin/viz-shell, and its alias vz
 ```
 
-In any git repository, name an image, then run `vz`:
+This repository is the worked example: three files.
 
 ```yaml
-# viz-shell.yml
-image: rust:1.98.1-slim-trixie
+# vz.yml: the toolchain to build viz-shell, on the library's Debian
+name: default
+extends: vz-debian-trixie              # the library's base: sudo, the docker CLI, locales
+image: { dockerfile: Dockerfile }      # ARG BASE: built on vz-debian-trixie's image
+state:
+  - /usr/local/cargo/registry          # survives the container, kept in .vz_state/
+env:
+  defaults: { RUST_LOG: info, CARGO_TERM_COLOR: always }
+  files: [.env]                        # read on the host, never mounted
 ```
 
-The first run also writes `~/.config/viz-shell/viz-shell.global.yml`: your defaults for every
-repository, with a `trusted` profile that grants sudo, docker and the host's network when you ask for
-it, and the base image's Dockerfile beside it.
+```yaml
+# dev.vz.yml: the developer shell, on the toolchain
+name: dev
+extends: default
+image: { dockerfile: dev.Dockerfile }  # fish, Node, opencode, Codex, Claude Code
+shell: fish
+state: [~/.config/fish, ~/.local/share/fish, ~/.codex, ~/.claude]
+env:
+  passthrough: [CLAUDE_CODE_OAUTH_TOKEN]
+```
 
-A fuller configuration:
+```sh
+vz new            # the toolchain
+vz new -c dev     # the developer shell
+```
+
+The first run writes your library, `~/.config/viz-shell/`: one configuration, `vz-debian-trixie`, and
+the Dockerfile it builds. Your own additions are one more file, not checked in:
 
 ```yaml
-image:
-  dockerfile: Dockerfile               # ARG BASE: stacks on the global configuration's base
-shell: fish
-state:                                 # survives the container, kept in .vz_state/
-  - /usr/local/cargo/registry
-  - ~/.local/share/opencode
+# sally.vz.yml
+name: sally
+extends: dev
 mounts:
-  - ~/repos                            # read-only; this repository stays read-write
+  - ~/repos/notes:rw
 env:
-  files: [.env]                        # read on the host, never mounted
   passthrough: [GH_TOKEN]
-profiles:
-  trusted:                             # vz --profile trusted
-    privileges: { sudo: true }
-    share: { docker: true }
 ```
 
 ## How vz differs
@@ -112,8 +124,7 @@ profiles:
 ## Guide
 
 - [Use](#use)
-- [Whose file is it](#whose-file-is-it)
-- [How configuration stacks](#how-configuration-stacks)
+- [Configurations](#configurations)
 - [Sessions](#sessions)
 - [Images](#images)
 - [Your user in the image](#your-user-in-the-image)
@@ -123,9 +134,6 @@ profiles:
 - [Privileges](#privileges)
 - [Environment](#environment)
 - [Hooks](#hooks)
-- [Profiles](#profiles)
-- [Global configuration](#global-configuration)
-- [Local configuration](#local-configuration)
 - [Examples](#examples)
 - [Logging](#logging)
 - [Development](#development)
@@ -134,21 +142,20 @@ profiles:
 ## Use
 
 ```sh
-vz                  # a shell: `shell`, else bash, else sh
+vz new              # a shell: `shell`, else bash, else sh
 vz -- cargo test    # one command instead
-vz -c other.yml     # another configuration: -c, --config-file
-vz --profile ci     # the default plus the profile ci; or VZ_PROFILE=ci
-vz --show-effective-config   # the configuration vz would run with, as vz.yml YAML; runs nothing
-vz profiles         # the profiles of the global, repository and local configuration
+vz new -c ci        # the configuration ci, after what it extends; or VZ_CONFIG=ci
+vz -f ci.yml        # also read this file, any YAML, as one of the repository's; repeatable
+vz --show-effective-config   # the chain, its images, the result as YAML; runs nothing
+vz configs          # the configurations of the repository and the library
 vz new api          # a container named api; see Sessions
 vz attach 0         # a shell in container 0 of this repository; or `vz at api`
 vz ls               # this repository's containers; --all for every repository's
 vz kill 0 api       # removes containers; --all for all of this repository's
 ```
 
-`vz` (the alias of `viz-shell`) reads its configuration at the git root, the first of `viz-shell.yml`,
-`viz-shell.yaml`, `vz.yml`, `vz.yaml` (it warns about any others), or the `-c` file, with the
-[global](#global-configuration) and your [local](#local-configuration) configuration. It pulls or
+`vz` alone lists the commands. `vz` (the alias of `viz-shell`) reads the [configurations](#configurations)
+of the repository and your library, and runs the chain of the one asked for, `default` without `-c`. It pulls or
 builds the image if missing, and runs a container, removed on exit unless `persistent`, with its
 [hooks](#hooks): `create` once, `attach` before every shell or command. `vz` exits with the shell's,
 or the command's, exit code. Inside:
@@ -158,11 +165,14 @@ or the command's, exit code. Inside:
 - `TERM`, `COLORTERM`, `LANG` and `VZ_LOG` are copied in when set. A `TERM` the image has no
   description for, as slim images lack those of newer terminals like ghostty, kitty or wezterm,
   becomes `xterm-256color`, so tmux, less and htop still work;
-- `VZ_CONTAINER` names the container, `VZ_CONTAINER_PROFILE` its profile, when one, and `VZ_REPO`
+- `VZ_CONTAINER` names the container, `VZ_CONTAINER_CONFIG` its configuration, when not `default`, and `VZ_REPO`
   the repository root: for prompts, scripts and agents that want to know where they run.
 
-`banner: true` prints a banner above an interactive shell (never above `vz -- command`), in the
-manner of fastfetch: what the shell is about to be. Colored on a terminal, unless `NO_COLOR` is set.
+`banner:` prints a banner above an interactive shell (never above `vz -- command`), in the
+manner of fastfetch: what the shell is about to be. `true` shows the built-in art, `false` no banner,
+and a string, art of your own above the facts; an empty one, the facts alone. Write it as a `|2`
+block when its first line starts with spaces, so YAML knows the indentation. Colored on a terminal,
+unless `NO_COLOR` is set.
 The environment shows as a count, never names or values.
 
 ```
@@ -178,24 +188,25 @@ Version: 0.1.0
 Session: new, ephemeral
 Repo: ~/repos/app
 Branch: main
-Config: viz-shell.global.yml, viz-shell.yml, viz-shell.local.yml
-Profile: trusted
+Chain: vz-debian-trixie (library) → default → dev → sally
+Config: sally
 Image: vz-app:3f9c2a1b7d4e8f60 (on vz-viz-shell:9a1c0d2e5b7f3a41)
 Shell: fish
 Sudo: yes
 Docker: /run/user/1000/docker.sock
 Network: host
-Mounts: 4 (2 viz-shell.global.yml, 1 viz-shell.yml, 1 viz-shell.local.yml)
+Mounts: 4 (2 vz-debian-trixie.vz.yml, 1 vz.yml, 1 sally.vz.yml)
 State: 2 paths in ~/repos/app/.vz_state
 Env: 3 variables
 Hooks: 2 create, 1 attach
 ```
 
-The default global configuration turns it on; `banner: false` in a repository or profile turns it off.
+The library's `vz-debian-trixie` writes the built-in art out in full, so it is there to edit; a later
+configuration replaces it, or turns it off with `banner: false`.
 
 `shell` picks the interactive shell: a name on the image's `PATH`, or an absolute path. It is also
 `$SHELL` and your login shell inside. An image without it gives a warning, then bash, else sh, so a
-global `shell: fish` doesn't break images without fish. Keep fish's configuration and history per
+library `shell: fish` doesn't break images without fish. Keep fish's configuration and history per
 repository, apart from the host's, as state:
 
 ```yaml
@@ -205,63 +216,127 @@ state:
   - ~/.local/share/fish
 ```
 
-Unknown keys in `vz.yml` are refused, naming the line.
+Unknown keys in a configuration are refused, naming the line.
 
-## Whose file is it
+## Configurations
 
-| File | Owner | Checked in | Says |
-|---|---|---|---|
-| `viz-shell.yml` | the repository | yes | the portable dev environment: image, state, shell, hooks, share, privileges, `env` with its `.env` files and passthrough names |
-| `viz-shell.global.yml` | you, everywhere | no | your tools, mounts, credentials, banner, shell preference |
-| `viz-shell.local.yml` | you, in this repository | no | mounts and values only this checkout needs |
+A configuration is one YAML document: an image, state, mounts, env, hooks, and what the shell may
+share and do. `vz new` runs `default`; `vz new -c NAME` runs `NAME`, after the configurations it
+extends. Two places hold them: the **repository**, at the git root, and the **library**,
+`~/.config/viz-shell/` (or under `$XDG_CONFIG_HOME`), for configurations a repository extends by name.
 
-The portability test for the repository file: no host path outside the repository, except `state`,
-which lives inside it. A random user cloning the repository and running `vz` gets the environment;
-what they bring is theirs.
+1. **Files.** `vz.yml`, `*.vz.yml` and `*.vz.yaml`, in the repository root, the library, and the
+   folders the library's files list under `scan:`; nothing else is read, and a filename means nothing
+   more. `-f FILE` reads another file, any YAML, as one of the repository's. `scan:` belongs in a file
+   of the library folder, and is refused anywhere else.
+2. **Documents.** A file holds one or more documents, separated by `---`; each is a configuration.
+3. **Names.** `name:` is required, but for one configuration in each scope (the repository, the
+   library with its `scan:` folders): the one without a name is `default`. Two without, or two of one
+   name, in one scope are refused, naming both files. A configuration named `default` is an ordinary
+   one.
+4. **Extends.** One name, explicit; nothing is implied. It resolves to the repository's configuration,
+   else the library's, never to itself: a repository's `trusted` with `extends: trusted` extends the
+   library's. An unknown name is refused, listing the folders scanned and the names found; a cycle,
+   naming it.
+5. **Chain.** The parent's chain, then the configuration; later wins: settings (`image`, `state_dir`,
+   `banner`, `shell`, `persistent`, `attach`) are replaced, `share` and `privileges` per key,
+   `env.defaults` per variable name; in every list, an entry with an earlier one's key (a path; a name
+   for passthrough; the command for hooks) updates it in its place, a new one comes last, and
+   `enabled: false` removes one. A key twice in one list is refused. Paths are made absolute as each
+   file is read, relative to its own folder, so an entry is removed however either file writes it.
+6. **Images.** `image:` follows the chain: a Dockerfile declaring `ARG BASE` builds on the image
+   before it; one without it, or an image reference, replaces ([Images](#images)). `ARG BASE` without
+   a default requires an image before it, and is refused without one; `docker build .` then needs
+   `--build-arg BASE=…`; `# check=skip=InvalidDefaultArgInFrom` under `# syntax=` silences BuildKit's
+   lint about the missing default. An image holds only what its chain extends.
+7. **Default.** Without `-c`: the repository's `default`. The library holds none: without one, `vz new`
+   says ``no default configuration: add vz.yml with `extends: vz-debian-trixie`, or run with -c NAME``.
 
-## How configuration stacks
+A repository writes the configurations it needs, `trusted` too:
 
-Two axes. **Owner**: whose file, `global`, `repository`, `local`; always applied, in that order,
-never declared. **Profile**: what was asked for; `default`, a file's top-level keys, always applies,
-and `--profile gpu` adds `gpu` and what it `extends`, base-most first.
+```yaml
+# vz.yml
+name: default
+extends: vz-debian-trixie
+image: { dockerfile: Dockerfile }
+mounts:
+  - ~/repos                         # read-only
+---
+name: trusted
+extends: default                    # default's lineage, then this
+privileges: { sudo: true }
+share: { docker: true, host_network: true }
+```
+
+A configuration of your own, beside the repository's: whether it is checked in is yours.
+
+```yaml
+# sally.vz.yml
+name: sally
+extends: default
+image: { dockerfile: sally.Dockerfile }   # stacks on default's image
+mounts:
+  - ~/repos/shared-lib:rw                 # default mounts ~/repos read-only; this one, writable
+  - ~/.config/gh
+```
+
+```dockerfile
+# sally.Dockerfile
+ARG BASE            # the repository's image, passed by vz; this file does not build alone
+FROM ${BASE}
+RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+Run it with `vz new -c sally`, or `VZ_CONFIG=sally`. `--show-effective-config` prints the chain, one
+line per configuration with its file, each image with its configuration, file and verdict, then the
+result as YAML:
 
 ```
-              global   repository   local
-default         ●         ●          ●     always
-trusted         ●         ●          ·     --profile trusted, or extended by gpu
-gpu             ·         ●          ●     --profile gpu
+# vz-debian-trixie (~/.config/viz-shell/vz-debian-trixie.vz.yml)
+# default (vz.yml)
+# sally (sally.vz.yml)
+# image: ~/.config/viz-shell/vz-debian-trixie.Dockerfile (vz-debian-trixie, ~/.config/viz-shell/vz-debian-trixie.vz.yml)
+# image: Dockerfile (default, vz.yml, ARG BASE: required, stacks)
+# image: sally.Dockerfile (sally, sally.vz.yml, ARG BASE: required, stacks)
 ```
 
-- One fold over the grid, profiles outer, owners inner: `default` (global, repository, local), then
-  each profile of the chain the same way. A cell with no file, or no section in it, is skipped.
-- One merge rule: later wins; keyed lists merge by key. More specific wins; among versions of the
-  same thing, the later owner wins.
-- Owners are ownership, not inheritance: the repository file cannot opt out of your files, which keeps
-  it portable. `extends` is explicit: a choice among profiles.
-- `image:` follows the same order, each one replacing the one before, or stacking on it when its
-  Dockerfile declares `ARG BASE` ([Images](#images)).
-- The image belongs to the repository; the session belongs to the user. No owner can change a
-  repository's image unless its Dockerfile declares `ARG BASE`, and no build arg reaches a Dockerfile
-  that does not declare it: a Dockerfile with a pinned `FROM` and no `ARG BASE` builds the same for
-  everyone. Mounts, env, state, hooks and the shell are the session: yours, on your machine.
-- The global file is a convenience, not a requirement: a repository file alone runs `vz`.
-- `--show-effective-config` prints the grid as applied and each `image:` with its cell;
-  `vz profiles` lists which owners define each profile, `default` first. `default` is no name for a
-  profile.
+`vz configs` lists every configuration, the repository's first: its name, file, what it extends, what
+it changes.
+
+- The chain is recorded on the container, in the labels `vz.chain` (`<config>@<file>`, fold order)
+  and `vz.image` (tags, bottom first), and shown on entry as `Chain:`, attached or not, a library
+  configuration marked `(library)`; `docker inspect` has it for debugging.
+
+**The library.** The first `vz` writes one template when the library has no configuration named
+`vz-debian-trixie`, from [`templates/`](templates), embedded in the binary, and never overwrites a
+file: `vz-debian-trixie.vz.yml`, Debian trixie with sudo, the docker CLI and locales, what vz's
+features need, every option written at its default with what flipping it does; and
+`vz-debian-trixie.Dockerfile`, which it builds. A repository extends it by name. Add configurations of
+your own beside it, for repositories to extend.
+
+The portability test for a repository's configurations: no host path outside the repository, except
+`state`, which lives inside it. Someone cloning the repository gets its environment; what it extends
+from their library is theirs.
+
+Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, which can name any host
+file or share the docker daemon. Review a repository's configuration as you would its code. What
+protects the host is what reaches the container: only the repository, and what the configuration
+shares, mounts or grants; and, unless `privileges.sudo` is granted, the secure floor inside it.
 
 ## Sessions
 
 Every container is named `vz-<index>-<repository>`, its hostname too, so your prompt says which one
 you are in. The index is the lowest free one of the repository's containers; `vz new api` adds a
-name: `vz-1-app-api`. Labels (`vz.repo`, `vz.index`, `vz.name`, `vz.profile`, …) identify them:
+name: `vz-1-app-api`. Labels (`vz.repo`, `vz.index`, `vz.name`, `vz.config`, …) identify them:
 `vz ls`, `vz attach` and `vz kill` look containers up by label, by index or name.
 
 ```yaml
 persistent: true    # the container outlives the shell that created it; `vz kill` removes it
-attach: true        # a plain `vz` joins this repository's container of the same profile
+attach: true        # `vz new` without a name joins this repository's container of the same configuration
 ```
 
-| `persistent` | `attach` | `vz` | the creating shell exits | the next `vz` |
+| `persistent` | `attach` | `vz new` | the creating shell exits | the next `vz new` |
 |---|---|---|---|---|
 | false | false | a new container | it is removed | another new one |
 | true | false | a new container | it is kept | another new one |
@@ -271,11 +346,11 @@ attach: true        # a plain `vz` joins this repository's container of the same
 - `vz attach [INDEX|NAME] [-- COMMAND]` (or `vz at`) runs a shell, or the command, in a container
   of this repository, as you; without a target, in the only running one. A stopped persistent
   container is started. `attach: true` joins unnamed containers only; a named one is attached by name.
-- A container is entered only with its own profile: `vz attach 0` to a container started with
-  `--profile trusted` is refused, naming `vz --profile trusted attach 0`. A plain `vz` never lands in
+- A container is entered only with its own configuration: `vz attach 0` to a container started with
+  `-c trusted` is refused, naming `vz -c trusted attach 0`. `vz new` never lands in
   a trusted container.
 - A container keeps the configuration it was created with; attaching after a change warns, and
-  `vz kill` then `vz` applies it.
+  `vz kill` then `vz new` applies it. `vz -- COMMAND` joins as `vz new` does.
 - Attaching is `docker exec` of vz's own binary: it waits for the entrypoint to finish setting you up,
   then becomes you, as the entrypoint does.
 
@@ -286,28 +361,30 @@ image: hello-world            # pull
 ```
 
 ```yaml
-image:                        # build; paths relative to the vz.yml's folder
+image:                        # build; paths relative to the configuration file's folder,
+                              #   or ~/… under your home, or absolute; ${repo}, ${home} substituted
   dockerfile: Dockerfile
-  context: .                  # optional, default: the vz.yml's folder
+  context: .                  # optional, default: the configuration file's folder
   args: { GREETING: hello }   # optional
 ```
 
 - A built image is tagged `vz-<Dockerfile's folder>:<hash of Dockerfile + args>` and builds only
-  when missing. One Dockerfile used by many repositories, say from the global configuration, is one image.
+  when missing. One Dockerfile used by many repositories, say from the library's `vz-debian-trixie`, is one image.
   Editing the Dockerfile or args rebuilds; editing a copied file does not — remove the image to force it.
 - Builds run `docker build`, via [docker-wrapper](https://github.com/joshrotenberg/docker-wrapper),
   so `.dockerignore` applies.
 - This repository's `Dockerfile`: the Rust toolchain, fish as its shell, and `vz` built from the
   checkout, stacked on the base (below); alone, on pinned Debian, with what the base adds.
 
-**Stacking.** A Dockerfile that declares `ARG BASE` (`ARG BASE=<default>`, then `FROM ${BASE}`, as
-below) is built on the image the earlier cells resolved to: vz pulls or builds that one first, then
-passes `--build-arg BASE=<its tag>`. Images follow the [fold order](#how-configuration-stacks), so a
-later cell's Dockerfile lands on top. The base's tag joins
-the hash: a new base rebuilds what stacks on it. With no earlier image, the default applies. A
-Dockerfile without `ARG BASE`, `BASE` set in `args`, or an image reference replaces.
-`--show-effective-config` lists the chain, each image marked `stacks` or `replaces`; the banner shows
-`Image: vz-app:3f9c2a1b (on vz-tools:9a1c0d2e, debian:stable-slim)`.
+**Stacking.** A Dockerfile that declares `ARG BASE` before its first `FROM`, then `FROM ${BASE}`, is
+built on the image the configurations before it in the chain resolved to: vz pulls or builds that one
+first, then passes `--build-arg BASE=<its tag>`. Images follow the [chain](#configurations), so a later
+configuration's Dockerfile lands on top. The base's tag joins the hash: a new base rebuilds what stacks on it. Three
+forms: `ARG BASE=<default>` stacks, and with no earlier image builds alone on its default;
+`ARG BASE` stacks, and with no earlier image is refused, naming the file; no `ARG BASE` (or `BASE`
+set in `args`, or an image reference) replaces. `--show-effective-config` marks each image
+`ARG BASE: stacks`, `ARG BASE: required, stacks`, `ARG BASE: its default` or `replaces`; the banner
+shows `Image: vz-app:3f9c2a1b (on vz-tools:9a1c0d2e, debian:stable-slim)`.
 
 **What an image needs.** Official images like `debian`, `alpine`, `rust`, `node` or `python` already
 meet the contract. For your own images:
@@ -316,14 +393,15 @@ meet the contract. For your own images:
 - tools under `/usr/local` or `/opt`, not in a home, so the image serves every user and `state`
   mounts in your home cannot shadow them;
 - no reliance on an `ENTRYPOINT` (vz runs its own) or on a baked user (vz adds you);
-- `sudo`, if a profile grants `privileges.sudo`.
+- `sudo`, if a configuration grants `privileges.sudo`.
 
-**Base image.** The first run writes `viz-shell.base.Dockerfile` next to the global configuration
-([`templates/viz-shell.base.Dockerfile`](templates/viz-shell.base.Dockerfile), embedded in the
-binary), and the global configuration's `image:` builds it, locally, on first use, as
-`vz-viz-shell:<hash>`. It holds what vz's features need: sudo, the docker CLI, locales,
-ca-certificates; nothing else. Edit it, or replace it in the global configuration with a Dockerfile
-of your own or an image reference.
+**Base image.** The first run writes the library's template, `vz-debian-trixie`
+([`templates/vz-debian-trixie.vz.yml`](templates/vz-debian-trixie.vz.yml) and
+[`templates/vz-debian-trixie.Dockerfile`](templates/vz-debian-trixie.Dockerfile), embedded in the
+binary); its `image:` builds the Dockerfile, locally, on first use, as `vz-viz-shell:<hash>`. It
+holds what vz's features need: sudo, the docker CLI, locales, ca-certificates; nothing else. A
+repository extends it by name; edit it, or add a configuration of your own beside it with another
+image.
 
 **How the image is built.** apt when Debian's version will do. Otherwise the vendor's release,
 downloaded from its URL and verified by sha256, or, for a static binary whose vendor publishes an
@@ -333,8 +411,8 @@ download checksummed.
 A repository stacks on it and adds what it needs:
 
 ```dockerfile
-# The image this one starts from: the global configuration's, else the default.
-ARG BASE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+# The image this one builds on, passed by vz; `docker build .` needs --build-arg BASE.
+ARG BASE
 FROM ${BASE}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git fish \
@@ -342,8 +420,8 @@ RUN apt-get update \
 ```
 
 An opinionated everyday image, with agents, shells and tools, is a repository of your own, built the
-same way; the global configuration's `image: { dockerfile: ... }` can point at a personal Dockerfile
-next to `viz-shell.global.yml`, for repositories without their own.
+same way: a configuration of your own in the library for repositories to extend, or beside a
+repository's own, stacked on its image ([Configurations](#configurations)).
 
 Pin a version, never a moving tag: a new base is then an edit to the `FROM`, which changes the
 image's hash, so the repository rebuilds on that branch, and only there.
@@ -382,7 +460,7 @@ Alpine: `addgroup -g "$VZ_GID" "$VZ_GROUP" && adduser -D -u "$VZ_UID" -G "$VZ_GR
   Anything else holding your name, uid or gid is refused, naming it.
 - Always pass `-d "$VZ_HOME"`. On Ubuntu 23.04+, `userdel -r ubuntu` first: it holds uid 1000.
 - `USER` affects only the build; the container always starts as root for the entrypoint.
-- Don't set these in `vz.yml` `args`: they would override yours and fail the match.
+- Don't set these in a configuration's `args`: they would override yours and fail the match.
 
 ## State
 
@@ -404,7 +482,7 @@ state:
 
 - Expanded: `{ path, type: dir | file, init, enabled }`. `init` is a file's content when `vz`
   creates it; never rewritten.
-- `state_dir`: relative to the `vz.yml`'s folder, `~/…` or absolute. Without it every configuration,
+- `state_dir`: relative to the configuration file's folder, `~/…` or absolute. Without it every configuration,
   `-c` ones included, shares `.vz_state/` at the git root.
 - `vz` creates missing entries as you. Delete the state folder to start over; ignoring it in git is up to you,
   but keep it out of Docker build contexts: `**/.vz_state/` in `.dockerignore`.
@@ -448,7 +526,7 @@ mounts:
   the host replaces the file by renaming, as many editors and `git config` do. Folders have neither.
 - `- ~/.ssh` gives ssh inside your keys, `config` and `known_hosts`, as on the host. The keys are
   then readable by everything in the container: mount it only where you trust what runs there.
-- Mounts are keyed by their target, where they land, else their path: a profile updates or removes
+- Mounts are keyed by their target, where they land, else their path: a later configuration updates or removes
   one by it, in either form, and one source may land in several places.
 - A mount may land inside a state folder, such as a library inside a tool's persisted config: `vz`
   creates its mount point in the state folder, as you. It may not hold a state path, sit on one, or
@@ -473,7 +551,7 @@ share:
   it the shell still reaches the internet, through docker's own network, and the host answers to
   `host.docker.internal`, as in Docker Desktop, but not on its `localhost`.
   It gives no root, but the shell reaches every service the host does, and its ports can clash.
-- `false` in a profile turns either off: `share: { docker: false }`.
+- `false` in a later configuration turns either off: `share: { docker: false }`.
 - `vz` inside `vz` talks to the host's daemon, which mounts host paths: run the `vz` built in the
   repository (`target/…/release/viz-shell`); another is refused.
 
@@ -493,7 +571,7 @@ privileges:
   run, so a runaway or a fork bomb stops there, not at the host's limit.
 - `sudo: true`: docker's default capabilities, no `no-new-privileges`, no process limit of its own,
   and a password-less sudoers line for you. An image without sudo gets a warning, and the shell starts without it.
-- The global template grants it in its `trusted` profile; `false` in a profile takes it back.
+- The library's `trusted` grants it; `false` in a later configuration takes it back.
 
 ## Environment
 
@@ -517,9 +595,10 @@ vz --env RUST_LOG=debug         # 4. over everything; `--env NAME` copies the ho
 vz --show-env                   # every name and where it comes from, never a value
 ```
 
-- Paths are relative to the `vz.yml`'s folder, `~/…` or absolute. Files use `.env` syntax: `KEY=value`,
+- Paths are relative to the configuration file's folder, `~/…` or absolute. Files use `.env` syntax: `KEY=value`,
   `#` comments, `export`, and quotes around values with spaces.
-- `defaults` is a map, keyed by variable name: a profile overrides per name, `null` removes one.
+- `defaults` is a map, keyed by variable name: a later configuration overrides per name, `null`
+  removes one.
   `files` and `passthrough` are lists: expanded forms `{ path, required, enabled }` and `{ name, enabled }`.
 - An env file tracked by git is loaded with a warning: its values are in the repository's history.
 - Values reach the container by name (`docker create --env NAME`, and `docker exec` when attaching),
@@ -550,126 +629,50 @@ hooks:
 - A failing hook fails the entry, naming it and its exit status. A failed `create` runs again on the
   next entry.
 - Entries arriving while `create` runs wait for it.
-- Keyed by the command: a profile adds one, replaces one by the same command, or removes one with
+- Keyed by the command: a later configuration adds one, replaces one by the same command, or removes one with
   `enabled: false`. An empty command is refused.
 - Another shell's syntax goes through it: `fish -c '...'`.
 
 To seed a config file once, a `state` file with `init:` needs no hook.
 
-## Profiles
-
-Named layers on top of the `default` (a file's top-level keys), keyed by name, each with the same
-keys. Choose one with `vz --profile NAME` or `VZ_PROFILE=NAME`; plain `vz` uses the default alone.
-
-```yaml
-mounts:
-  - ~/repos
-
-profiles:
-  writable:
-    mounts: [~/repos:rw]                        # the same path: updated in its place, read-write
-  isolated:
-    mounts: [{ path: ~/repos, enabled: false }] # removed
-  scratch:
-    extends: isolated                           # starts from isolated
-    state: [~/scratch]                          # and adds its own
-```
-
-Order and merge rule: [How configuration stacks](#how-configuration-stacks). Every collection is a list:
-
-- An entry is a bare path or name for the common case, or expanded for anything else.
-- An entry with the same key (a path; a name for passthrough; the command for hooks) updates the
-  earlier one in its place; a new one comes last. `enabled: false` removes one. A key twice in one
-  list is refused.
-- Settings (`image`, `state_dir`, `banner`, `shell`, `persistent`, `attach`) are replaced; `share` and
-  `privileges` per key, `env.defaults` per variable name. An `image:` Dockerfile with `ARG BASE`
-  stacks instead: see [Images](#images).
-- The two maps: `env.defaults`, keyed by variable name, and `profiles`, keyed by profile name.
-- Profiles don't nest; `extends` cycles and unknown names are refused, naming the defined profiles.
-- `vz --profile NAME --show-effective-config` prints the result: the cells applied, shorthands spelled out.
-
-## Global configuration
-
-`~/.config/viz-shell/viz-shell.global.yml` (or under `$XDG_CONFIG_HOME`) has the same shape as a
-repository's configuration, and every repository starts from it. The first `vz` writes it from its
-built-in default ([`templates/viz-shell.global.yml`](templates/viz-shell.global.yml), embedded in
-the binary) when there is none, and never overwrites it: the [base image](#images) built from
-`viz-shell.base.Dockerfile` beside it, the banner on, and a `trusted` profile with sudo, docker, the
-host's network, `~/.ssh` and trusted-only secrets. Edit it freely.
-
-- The first of `viz-shell.global.yml`, `viz-shell.global.yaml`, `vz.global.yml`, `vz.global.yaml`.
-  A `global.yml`, the former name, is still read when none of them exists.
-
-- A repository without a configuration runs from the global one alone.
-- Order and merge rule: [How configuration stacks](#how-configuration-stacks).
-- A profile is a mode: each file says what it adds in it. A repository's `trusted:` adds to the global
-  `trusted`, and any profile can `extends: trusted`.
-- Relative paths belong to their file: `trusted.env` in `viz-shell.global.yml` is
-  `~/.config/viz-shell/trusted.env`.
-  Every path is made absolute when read, so a repository removes a global entry however it writes it.
-- `vz profiles` lists each profile and the owners that define it; `--show-effective-config` and
-  `--show-env` name the files read and the cells applied.
-
-Trust: `vz` runs the configuration it is given; it cannot tell a hostile one, which can name any host
-file or share the docker daemon. Review a repository's configuration as you would its code. What
-protects the host is what reaches the container: only the repository, and what the configuration
-shares, mounts or grants; and, unless `privileges.sudo` is granted, the secure floor inside it.
-
-## Local configuration
-
-Your own overlay of the repository's configuration, for this checkout only: a mount of a sibling
-repository, a value only your machine needs. Same shape as `vz.yml`.
-
-```yaml
-# viz-shell.local.yml
-mounts:
-  - ~/repos/shared-lib:rw     # the repository mounts it read-only; here, writable
-env:
-  defaults: { API_URL: http://localhost:8081 }
-```
-
-- At the git root, next to the repository's file: the first of `viz-shell.local.yml`,
-  `viz-shell.local.yaml`, `vz.local.yml`, `vz.local.yaml`. With `-c foo.yml`, `foo.local.yml` next to it.
-- Order: global, repository, local; later wins. Profiles from all three merge by name: a local
-  `trusted:` adds to the repository's and the global one.
-- Meant to be ignored by git: add `*.local.yml` to `.gitignore`, or to your global gitignore. `vz`
-  warns when it is tracked.
-- It may define its own profiles, selected with `--profile` like any other, and its own `image:`:
-  a personal Dockerfile with `ARG BASE` stacks on the repository's image.
-- A local file alone is no configuration: it needs a repository or a global one.
-- `--show-effective-config` names it and shows its cells: `default: …, local`, `<profile>: …, local`.
-
 ## Examples
 
-Recipes in [`examples/`](examples), each with a `test.sh` that runs it and checks the result.
-Copy a folder's `vz.yml` and `Dockerfile` to your repository root, or try one in place with `-c`.
+Recipes in [`examples/`](examples): each folder holds its configuration files, `<name>/*.vz.yml`,
+any Dockerfiles they build, and `<name>/test.bats`, a [bats](https://bats-core.readthedocs.io) file that
+runs the recipe and checks the result, one `@test` per check; `examples/helpers.bash`, loaded by each,
+sets up a throwaway home, library and repository and removes the containers a file started. Copy a
+folder's configuration files and Dockerfiles to your repository root, or try one in place with `-f`.
+
+`just examples` runs them all, `just examples mounts` one. They need docker: run them from inside vz,
+in this repository's `default` configuration, which shares the host's daemon (`vz -- just examples`).
 
 | Recipe | Shows |
 |---|---|
-| [`pull-image`](examples/pull-image) | the smallest `vz.yml` |
+| [`pull-image`](examples/pull-image) | the smallest configuration: one document, no `name:`, the default |
 | [`build-dockerfile`](examples/build-dockerfile) | building from a Dockerfile, with args |
-| [`image-stack`](examples/image-stack) | `ARG BASE` stacking on a built image and on a reference, replacing Dockerfiles, images named by their folder |
+| [`image-stack`](examples/image-stack) | `ARG BASE` stacking along the chain, on a built image and on a reference; replacing Dockerfiles; `deep` extending another document's `tools`; a configuration that extends nothing; images named by their folder |
 | [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
 | [`state`](examples/state) | folders, a file with `init`, absolute paths |
 | [`mounts`](examples/mounts) | the `path[:target][:ro\|rw]` string form: read-only `~/repos`, a read-write config folder, a single file, one source at several targets, a mount inside state, a mount on the repository skipped |
-| [`profiles`](examples/profiles) | overriding and removing entries, `extends`, `VZ_PROFILE` |
-| [`docker`](examples/docker) | the host's docker daemon inside, as you; off in a profile |
-| [`env`](examples/env) | every environment source and their order, a profile's overrides, values kept out of sight, the `TERM` fallback |
-| [`global`](examples/global) | a repository without configuration, repository over global, trusted-only secrets, the former name `global.yml` |
-| [`local`](examples/local) | a local overlay over the repository's file: a value, a mount's mode, an added mount, a profile, a profile of its own; the warning when it is tracked |
-| [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in a profile; an image without sudo |
-| [`host-network`](examples/host-network) | the host's network in a profile, docker's own by default, `host.docker.internal` |
+| [`configs`](examples/configs) | documents of one file, each extending `default`: overriding and removing entries; `debian12` in a file of its own; `trusted` with `extends: trusted` reaching the library's; `VZ_CONFIG` |
+| [`docker`](examples/docker) | the host's docker daemon inside, as you; off in another configuration |
+| [`env`](examples/env) | every environment source and their order, a later configuration's overrides, values kept out of sight, the `TERM` fallback |
+| [`library`](examples/library) | no default in the library; a library configuration run by name; a repository's nameless default `extends: vz-debian-trixie`; its `trusted` on the library's; `vz configs`; a library filename meaning nothing |
+| [`local`](examples/local) | a configuration of your own: `sally.vz.yml` extending the default, a value, a mount's mode, an added mount, `sally.Dockerfile` stacked on its image; `joe.vz.yml` with the banner, its `Chain:` and `Config:` |
+| [`resolution`](examples/resolution) | what reading and resolving refuse: an unknown name, a cycle, two names in `extends`, `profiles:`, two without `name:`, one name twice, a nameless one beside a `default`, `ARG BASE` with nothing before it, `scan:` outside the library, one library name in two folders, no default |
+| [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in another configuration; an image without sudo |
+| [`host-network`](examples/host-network) | the host's network in another configuration, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |
 | [`sessions`](examples/sessions) | named containers, `VZ_CONTAINER`, persistent ones, attach by index, name or `attach: true`, kill |
-| [`hooks`](examples/hooks) | `create` once per container, across a stop and start, and `attach` per entry, in order, in the repository root; one removed in a profile; a failing hook |
+| [`hooks`](examples/hooks) | `create` once per container, across a stop and start, and `attach` per entry, in order, in the repository root; one removed in another configuration; a failing hook; `attach: true`, the next vz running `attach` again; configurations in files of their own extending them |
 
 ## Logging
 
 Stderr, filtered by `VZ_LOG` (default `warn,viz_shell=info,docker_wrapper=error`):
 
 ```sh
-VZ_LOG=viz_shell=debug vz    # each step, and every docker command in full
-VZ_LOG=debug vz       # plus docker-wrapper's spans: each CLI call, exit code, output size
+VZ_LOG=viz_shell=debug vz new   # each step, and every docker command in full
+VZ_LOG=debug vz new      # plus docker-wrapper's spans: each CLI call, exit code, output size
 ```
 
 ## Development
@@ -682,15 +685,17 @@ just install              # → ~/.local/bin/viz-shell, and the alias ~/.local/b
 Rust 1.98.1 and the musl target are pinned in `rust-toolchain.toml`. The binary is static,
 because `vz` mounts itself into every container it starts: build it anywhere, run it on any Linux host.
 
+Inside vz: `vz new -c dev`, the toolchain with fish and the coding agents, then `just build` there.
+
 Build first (`just build`); the example tests run `target/.../release/viz-shell`, or `$VZ`.
-Each runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches yours,
-and starts with an empty `.vz_state/`. This repository shares docker, so everything runs inside `vz`
-too: `vz -- just build examples`.
+Each file runs with a throwaway `HOME` (`target/vz-examples/<example>/home`), so `~` never touches
+yours, and starts with an empty `.vz_state/`. `vz -- just examples` runs them inside, in `default`,
+which shares the host's docker daemon; from `dev`, no: the agents' configuration does not reach it.
 
 ```sh
 just test                  # unit tests, no engine needed
-just examples              # every example's test.sh, against the built vz; needs docker
-just example state         # one of them
+just examples              # every examples/*/test.bats, with bats, against the built vz; needs docker
+just examples state        # one of them
 ```
 
 Issues and pull requests are welcome. Run `just test` and `just examples` before sending one.

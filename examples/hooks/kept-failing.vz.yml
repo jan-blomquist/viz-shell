@@ -1,0 +1,4 @@
+# A failing create hook in a persistent container names itself.
+name: kept-failing
+extends: failing
+persistent: true

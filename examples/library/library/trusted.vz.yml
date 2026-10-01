@@ -1,0 +1,7 @@
+# The library's `trusted`, on vz-debian-trixie: its image, plus secrets only
+# trusted configurations see.
+name: trusted
+extends: vz-debian-trixie
+env:
+  files:
+    - environment.trusted         # ~/.config/viz-shell/environment.trusted

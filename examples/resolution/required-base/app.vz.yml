@@ -1,0 +1,3 @@
+# A Dockerfile declaring `ARG BASE` without a default needs an image before it
+# in the chain; here there is none: refused, naming the Dockerfile.
+image: { dockerfile: overlay.Dockerfile }

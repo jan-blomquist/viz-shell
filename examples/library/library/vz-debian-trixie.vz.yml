@@ -1,0 +1,11 @@
+# A cheap stand-in for the library's template, as this example's test writes
+# it into its throwaway home: a configuration named vz-debian-trixie, on a
+# pulled image. Relative paths are relative to it.
+name: vz-debian-trixie
+image: debian:stable-slim
+
+env:
+  defaults:
+    WHO: library
+  files:
+    - environment                 # ~/.config/viz-shell/environment

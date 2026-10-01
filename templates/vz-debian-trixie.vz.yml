@@ -1,0 +1,56 @@
+# The library's base: Debian trixie with sudo, the docker CLI and locales,
+# built from vz-debian-trixie.Dockerfile beside it. A repository extends it by
+# name: `extends: vz-debian-trixie`. Every option is written at the value vz
+# uses without it. vz wrote this file on its first run and never overwrites it:
+# edit it freely. Relative paths are relative to this folder.
+
+name: vz-debian-trixie
+
+# The image: a Dockerfile built locally, or a reference such as debian:trixie.
+image:
+  dockerfile: vz-debian-trixie.Dockerfile
+  # context: .                  # what the build sees; default: this folder
+  # args: {}                    # build args; `ARG BASE` in a Dockerfile above stacks on this image
+
+# The art above an interactive shell; `true` for this built-in one, `false` for none, or your own.
+banner: |2
+         _              _          _ _
+  __   _(_)____     ___| |__   ___| | |
+  \ \ / / |_  /____/ __| '_ \ / _ \ | |
+   \ V /| |/ /_____\__ \ | | |  __/ | |
+    \_/ |_/___|    |___/_| |_|\___|_|_|
+
+# shell: bash                   # a name on the image's PATH, or an absolute path; unset: bash, else sh
+
+# true: the container outlives the shell that created it; `vz kill` removes it.
+persistent: false
+
+# true: `vz new` without a name joins a running or kept container of this configuration.
+attach: false
+
+privileges:
+  sudo: false                   # true: root through sudo, docker's default capabilities, no process limit
+
+share:
+  docker: false                 # true: the host's docker daemon, through its socket
+  host_network: false           # true: the host's network: its localhost and ports
+
+# Host paths shown inside, read-only unless `:rw`; each must exist on the host.
+mounts: []
+  # - ~/.gitconfig
+
+# Container paths whose contents outlive the container, kept with the repository.
+state: []
+  # - ~/.cache/pip
+
+# Commands run inside, as you, in the repository.
+hooks:
+  create: []                    # once per container, on its first entry
+  attach: []                    # before every entry
+
+env:
+  defaults: {}                  # values written here; a later source wins
+  files:
+    - environment               # ~/.config/viz-shell/environment; skipped while it does not exist
+  passthrough:
+    - EDITOR                    # copied from the host when set

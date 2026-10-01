@@ -2,27 +2,28 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::constants::PROFILE_ENV;
+use crate::constants::CONFIG_ENV;
 
 /// One shell for every repo.
 #[derive(Debug, Parser)]
-#[command(name = "viz-shell", version)]
+#[command(name = "viz-shell", version, arg_required_else_help = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub action: Option<Action>,
 
-    /// The repository configuration to use instead of the one at the git
-    /// root (viz-shell.yml, …, vz.yaml). Paths in it are relative to its folder.
-    #[arg(short = 'c', long, global = true)]
-    pub config_file: Option<PathBuf>,
+    /// The configuration to run, after the ones it extends: the
+    /// repository's, else the library's. Without it: default
+    #[arg(short = 'c', long, value_name = "NAME", env = CONFIG_ENV, global = true)]
+    pub config: Option<String>,
 
-    /// A profile from any configuration file, applied on top of the default
-    /// (the top-level keys), after the profiles it extends
-    #[arg(long, env = PROFILE_ENV, global = true)]
-    pub profile: Option<String>,
+    /// Also read this YAML file, as one of the repository's; repeatable.
+    /// Paths in it are relative to its folder
+    #[arg(short = 'f', long = "file", value_name = "FILE", global = true)]
+    pub files: Vec<PathBuf>,
 
-    /// Print the configuration vz would run with, as YAML, and exit
-    #[arg(long)]
+    /// Print the configuration chain, the image chain and the configuration
+    /// vz would run with, as YAML, and exit
+    #[arg(long, global = true)]
     pub show_effective_config: bool,
 
     /// Set a variable inside, over every other source: KEY=VALUE, or KEY to
@@ -32,7 +33,7 @@ pub struct Cli {
 
     /// Print the environment's variable names and where each comes from, never
     /// a value, and exit
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub show_env: bool,
 
     /// A command to run instead of the shell: `vz -- cargo test`
@@ -42,9 +43,11 @@ pub struct Cli {
 
 #[derive(Debug, PartialEq, Subcommand)]
 pub enum Action {
-    /// Start a named container: `vz new api`, then `vz attach api`
+    /// A shell in a new container; named: `vz new api`, then `vz attach api`
     New {
-        name: String,
+        /// Names the container; without one, `attach: true` joins a
+        /// container of this configuration instead
+        name: Option<String>,
         /// A command to run instead of the shell
         #[arg(last = true)]
         command: Vec<String>,
@@ -74,8 +77,8 @@ pub enum Action {
         #[arg(long, conflicts_with = "targets")]
         all: bool,
     },
-    /// List the profiles of the global, repository and local configuration
-    Profiles,
+    /// List the configurations of the repository and the library
+    Configs,
     /// Inside the container: add the host user, then run the command as it,
     /// or hold for shells to attach
     #[command(hide = true)]
@@ -109,40 +112,59 @@ mod tests {
         args.iter().map(|arg| arg.to_string()).collect()
     }
 
+    /// Not isolated: `-c` falls back to `VZ_CONFIG`, so in a shell that
+    /// exports it this goes red (and bare `vz` says "nothing to run" instead
+    /// of help). Unset VZ_CONFIG to run it; see the audit report.
     #[test]
-    fn parse__config_file_with_profiles__before_or_after_it() {
-        for args in [
-            ["vz", "-c", "other.yml", "profiles"],
-            ["vz", "profiles", "-c", "other.yml"],
-        ] {
-            let cli = Cli::try_parse_from(args).unwrap();
+    fn parse__nothing__help_instead() {
+        let error = Cli::try_parse_from(["vz"]).unwrap_err();
 
-            assert_eq!(cli.action, Some(Action::Profiles), "{args:?}");
-            assert_eq!(
-                cli.config_file,
-                Some(PathBuf::from("other.yml")),
-                "{args:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse__config_file_short_and_long__same_path() {
-        let short = Cli::try_parse_from(["vz", "-c", "examples/state/vz.yml"]).unwrap();
-        let long = Cli::try_parse_from(["vz", "--config-file", "examples/state/vz.yml"]).unwrap();
-
-        let expected = Some(PathBuf::from("examples/state/vz.yml"));
         assert_eq!(
-            (short.config_file, long.config_file),
-            (expected.clone(), expected)
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
     }
 
     #[test]
-    fn parse__profile__names_it() {
-        let cli = Cli::try_parse_from(["vz", "--profile", "ci", "--", "true"]).unwrap();
+    fn parse__file_with_configs__before_or_after_it() {
+        for args in [
+            ["vz", "-f", "other.vz.yml", "configs"],
+            ["vz", "configs", "-f", "other.vz.yml"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
 
-        assert_eq!(cli.profile.as_deref(), Some("ci"));
+            assert_eq!(cli.files, [PathBuf::from("other.vz.yml")], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn parse__file_repeated__each_in_order_short_or_long() {
+        let cli = Cli::try_parse_from(["vz", "-f", "app.vz.yml", "--file", "ci.yml"]).unwrap();
+
+        assert_eq!(
+            cli.files,
+            [PathBuf::from("app.vz.yml"), PathBuf::from("ci.yml")]
+        );
+    }
+
+    #[test]
+    fn parse__config_short_or_long__names_it() {
+        for args in [
+            ["vz", "-c", "ci", "--", "true"],
+            ["vz", "--config", "ci", "--", "true"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+
+            assert_eq!(cli.config.as_deref(), Some("ci"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn parse__show_flags_after_a_subcommand__apply() {
+        let cli =
+            Cli::try_parse_from(["vz", "new", "-c", "ci", "--show-effective-config"]).unwrap();
+
+        assert!(cli.show_effective_config);
     }
 
     #[test]
@@ -172,18 +194,32 @@ mod tests {
 
     #[test]
     fn parse__sessions__each_command() {
-        let cases: [(&[&str], Action); 7] = [
+        let cases: [(&[&str], Action); 10] = [
+            (
+                &["vz", "new"],
+                Action::New {
+                    name: None,
+                    command: vec![],
+                },
+            ),
+            (
+                &["vz", "new", "--", "id"],
+                Action::New {
+                    name: None,
+                    command: strings(&["id"]),
+                },
+            ),
             (
                 &["vz", "new", "api"],
                 Action::New {
-                    name: "api".to_owned(),
+                    name: Some("api".to_owned()),
                     command: vec![],
                 },
             ),
             (
                 &["vz", "new", "api", "--", "cargo", "test"],
                 Action::New {
-                    name: "api".to_owned(),
+                    name: Some("api".to_owned()),
                     command: strings(&["cargo", "test"]),
                 },
             ),
@@ -202,6 +238,7 @@ mod tests {
                 },
             ),
             (&["vz", "ls", "--all"], Action::Ls { all: true }),
+            (&["vz", "configs"], Action::Configs),
             (
                 &["vz", "kill", "0", "api"],
                 Action::Kill {
@@ -226,13 +263,18 @@ mod tests {
 
     #[test]
     fn parse__kill_without_targets__refused() {
-        assert!(Cli::try_parse_from(["vz", "kill"]).is_err());
+        let error = Cli::try_parse_from(["vz", "kill"]).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
-    fn parse__profile_after_the_subcommand__applies() {
-        let cli = Cli::try_parse_from(["vz", "attach", "0", "--profile", "trusted"]).unwrap();
+    fn parse__config_after_the_subcommand__applies() {
+        let cli = Cli::try_parse_from(["vz", "attach", "0", "-c", "trusted"]).unwrap();
 
-        assert_eq!(cli.profile.as_deref(), Some("trusted"));
+        assert_eq!(cli.config.as_deref(), Some("trusted"));
     }
 }

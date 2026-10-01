@@ -1,0 +1,2 @@
+# Nameless too: two without `name:` in one scope are refused, naming both files.
+image: alpine:3

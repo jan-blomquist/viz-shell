@@ -1,0 +1,20 @@
+# Privileges: by default the shell runs on the secure floor, holding no
+# capabilities, and setuid programs such as sudo gain nothing. A configuration
+# grants sudo: root through sudo, with docker's default capabilities.
+name: default
+image:
+  dockerfile: Dockerfile
+
+---
+name: trusted
+extends: default
+privileges:
+  sudo: true
+
+---
+# sudo granted, but the image has none: a warning, and the shell starts.
+name: no-sudo-image
+extends: default
+image: debian:stable-slim
+privileges:
+  sudo: true
