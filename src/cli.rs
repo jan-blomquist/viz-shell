@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::constants::CONFIG_ENV;
-
 /// One shell for every repo.
 #[derive(Debug, Parser)]
 #[command(name = "viz-shell", version, arg_required_else_help = true)]
@@ -12,8 +10,8 @@ pub struct Cli {
     pub action: Option<Action>,
 
     /// The configuration to run, after the ones it extends: the
-    /// repository's, else the library's. Without it: default
-    #[arg(short = 'c', long, value_name = "NAME", env = CONFIG_ENV, global = true)]
+    /// repository's, else the library's. Without it: $VZ_CONFIG, else default
+    #[arg(short = 'c', long, value_name = "NAME", global = true)]
     pub config: Option<String>,
 
     /// Also read this YAML file, as one of the repository's; repeatable.
@@ -112,9 +110,6 @@ mod tests {
         args.iter().map(|arg| arg.to_string()).collect()
     }
 
-    /// Not isolated: `-c` falls back to `VZ_CONFIG`, so in a shell that
-    /// exports it this goes red (and bare `vz` says "nothing to run" instead
-    /// of help). Unset VZ_CONFIG to run it; see the audit report.
     #[test]
     fn parse__nothing__help_instead() {
         let error = Cli::try_parse_from(["vz"]).unwrap_err();

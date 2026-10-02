@@ -26,10 +26,10 @@ use crate::build::ImageStep;
 use crate::cli::{Action, Cli};
 use crate::config::{Link, RealFiles, Request};
 use crate::constants::{
-    CONTAINER_CONFIG_ENV, CONTAINER_ENV, DEFAULT_CONFIG, DEFAULT_LOG_FILTER, DEFAULT_STATE_DIR,
-    DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GROUP_ENV, GROUPS_ENV, HOME_ENV, HOOKS_ATTACH_ENV,
-    HOOKS_CREATE_ENV, LIBRARY_BASE_FILE, LIBRARY_DIR, LOG_ENV, MOUNTINFO_FILE, PASSTHROUGH_ENV,
-    REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
+    CONFIG_ENV, CONTAINER_CONFIG_ENV, CONTAINER_ENV, DEFAULT_CONFIG, DEFAULT_LOG_FILTER,
+    DEFAULT_STATE_DIR, DOCKER_HOST_ENV, ENTRYPOINT_PATH, GID_ENV, GROUP_ENV, GROUPS_ENV, HOME_ENV,
+    HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, LIBRARY_BASE_FILE, LIBRARY_DIR, LOG_ENV, MOUNTINFO_FILE,
+    PASSTHROUGH_ENV, REPO_ENV, SHELL_ENV, SUDO_ENV, UID_ENV, USER_ENV,
 };
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
@@ -96,8 +96,15 @@ fn request(cli: &Cli, user: &User) -> anyhow::Result<Request> {
         repo_root: repo::root()?,
         library_dir,
         extra_files,
-        config: cli.config.clone().filter(|name| name != DEFAULT_CONFIG),
+        config: config_name(cli.config.clone(), std::env::var(CONFIG_ENV).ok())
+            .filter(|name| name != DEFAULT_CONFIG),
     })
+}
+
+/// The configuration asked for: `-c`, else `VZ_CONFIG`; empty is unset.
+/// Not a clap `env`: bare `vz` must list commands whatever the shell exports.
+fn config_name(flag: Option<String>, env: Option<String>) -> Option<String> {
+    flag.or(env.filter(|name| !name.is_empty()))
 }
 
 /// `$XDG_CONFIG_HOME/viz-shell`, or `~/.config/viz-shell` without it.
@@ -588,6 +595,23 @@ fn init_tracing() {
 #[allow(non_snake_case)] // unit__scenario__expected test names
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_name__flag_and_env__flag_else_nonempty_env() {
+        let some = |name: &str| Some(name.to_owned());
+        for (flag, env, expected) in [
+            (some("ci"), some("sally"), Some("ci")),
+            (None, some("sally"), Some("sally")),
+            (None, some(""), None),
+            (None, None, None),
+        ] {
+            let case = format!("{flag:?} {env:?}");
+
+            let name = config_name(flag, env);
+
+            assert_eq!(name.as_deref(), expected, "{case}");
+        }
+    }
 
     #[test]
     fn reserved_env_names__hooks_and_repo__included() {
