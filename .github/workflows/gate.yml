@@ -1,0 +1,74 @@
+# Every pull request and master: format, lints, unit tests and the static build
+# on the runner; then the examples run through vz itself, from the repository's
+# own image, against the runner's docker engine.
+name: gate
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# A new push supersedes the run still going on the same ref.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # rust-toolchain.toml is the one source of the version, components and target.
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # just lands in ~/.local/bin, no sudo; `just install` puts vz beside it.
+      # Same artefact and sha256 as the Dockerfile's.
+      - name: Install just
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.local/bin
+          curl -fsSLo "$RUNNER_TEMP/just.tgz" \
+            https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-x86_64-unknown-linux-musl.tar.gz
+          echo "4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d  $RUNNER_TEMP/just.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/just.tgz" -C ~/.local/bin --no-same-owner just
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build
+        run: just build
+
+      - name: Install vz
+        run: |
+          set -euo pipefail
+          just install
+          vz --version
+
+      # The first run scaffolds the library, builds the base and stacks the
+      # root Dockerfile on it; bats comes from that image, docker through the
+      # shared socket. Follow-up: a docker save/load cache keyed by the two
+      # Dockerfiles, once the cold time is measured.
+      - name: Examples
+        run: vz -- just examples

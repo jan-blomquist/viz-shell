@@ -10,8 +10,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/jan-blomquist/viz-shell/actions/workflows/gate.yml"><img alt="gate" src="https://github.com/jan-blomquist/viz-shell/actions/workflows/gate.yml/badge.svg?branch=master"></a>
   <a href="#license"><img alt="License: MIT or Apache-2.0" src="https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue"></a>
-  <img alt="Rust 1.95+" src="https://img.shields.io/badge/rust-1.95%2B-orange">
+  <img alt="Rust 1.98+" src="https://img.shields.io/badge/rust-1.98%2B-orange">
   <img alt="Linux" src="https://img.shields.io/badge/platform-linux-lightgrey">
 </p>
 
@@ -697,6 +698,10 @@ just test                  # unit tests, no engine needed
 just examples              # every examples/*/test.bats, with bats, against the built vz; needs docker
 just examples state        # one of them
 ```
+
+The gate, `.github/workflows/gate.yml`, runs on every pull request and on master: it builds vz on the runner,
+then runs the example tests through it, from this repository's `default` image. Every run proves the glory
+path on a clean machine: scaffolding the library, building the base, stacking, the socket share.
 
 Issues and pull requests are welcome. Run `just test` and `just examples` before sending one.
 
