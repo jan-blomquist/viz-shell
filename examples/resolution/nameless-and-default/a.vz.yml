@@ -1,0 +1,2 @@
+# Missing `name:`: the repository's one nameless configuration is `default`.
+image: debian:stable-slim

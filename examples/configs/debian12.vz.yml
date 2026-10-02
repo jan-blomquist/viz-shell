@@ -1,0 +1,5 @@
+# A configuration in a file of its own; the filename means nothing, the
+# name does. It extends the default: its mounts, then this image.
+name: debian12
+extends: default
+image: debian:bookworm-slim

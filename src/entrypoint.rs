@@ -569,95 +569,174 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hostname_line__hosts_file__only_when_the_hostname_is_missing() {
-        let hosts = "127.0.0.1\tlocalhost\n# 127.0.1.1 box\n172.17.0.2\tabc123 other\n";
-        let cases = [
-            ("box", Some("127.0.1.1\tbox".to_owned())),
-            ("abc123", None),
-            ("other", None),
-            ("localhost", None),
-            ("", None),
-        ];
+    /// A hosts file naming `localhost`, `abc123` and `other`, with `box`
+    /// only in a comment.
+    const HOSTS: &str = "127.0.0.1\tlocalhost\n# 127.0.1.1 box\n172.17.0.2\tabc123 other\n";
 
-        for (hostname, expected) in cases {
-            assert_eq!(hostname_line(hosts, hostname), expected, "{hostname}");
+    #[test]
+    fn hostname_line__hostname_missing__a_line_for_it() {
+        let line = hostname_line(HOSTS, "box");
+
+        assert_eq!(line.as_deref(), Some("127.0.1.1\tbox"));
+    }
+
+    #[test]
+    fn hostname_line__hostname_listed_or_empty__none() {
+        let cases = [
+            ("the first name of a line", "abc123"),
+            ("a later name of a line", "other"),
+            ("localhost", "localhost"),
+            ("empty", ""),
+        ];
+        for (case, hostname) in cases {
+            let line = hostname_line(HOSTS, hostname);
+
+            assert_eq!(line, None, "{case}");
         }
     }
 
     #[test]
     fn sudoers_line__user__without_a_password() {
-        assert_eq!(sudoers_line("sally"), "sally ALL=(ALL) NOPASSWD:ALL\n");
+        let line = sudoers_line("sally");
+
+        assert_eq!(line, "sally ALL=(ALL) NOPASSWD:ALL\n");
     }
 
-    #[test]
-    fn find_program__name_or_path__an_executable_where_it_is() {
+    /// Three folders on a search path, `local:usr::bin`: fish in local and
+    /// usr, zsh in bin, and a `nu` there that is not executable.
+    struct Programs {
+        _root: tempfile::TempDir,
+        search_path: String,
+        local_fish: PathBuf,
+        usr_fish: PathBuf,
+        zsh: PathBuf,
+        not_executable: PathBuf,
+    }
+
+    fn programs() -> Programs {
         let root = tempfile::tempdir().unwrap();
-        let dir = |name: &str| {
-            let dir = root.path().join(name);
+        let file = |dir: &str, name: &str, mode: u32| {
+            let dir = root.path().join(dir);
             std::fs::create_dir_all(&dir).unwrap();
-            dir
-        };
-        let (local, usr, bin) = (dir("local"), dir("usr"), dir("bin"));
-        let file = |dir: &Path, name: &str, mode: u32| {
             let path = dir.join(name);
             std::fs::write(&path, "").unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
             path
         };
-        let local_fish = file(&local, "fish", 0o755);
-        let usr_fish = file(&usr, "fish", 0o755);
-        let zsh = file(&bin, "zsh", 0o755);
-        let not_executable = file(&bin, "nu", 0o644);
-        let search_path = format!("{}:{}::{}", local.display(), usr.display(), bin.display());
-        let cases = [
-            ("fish", Some(&local_fish)),
-            ("zsh", Some(&zsh)),
-            (usr_fish.to_str().unwrap(), Some(&usr_fish)),
-            ("nu", None),
-            (not_executable.to_str().unwrap(), None),
-            ("bash", None),
-        ];
-
-        for (name, expected) in cases {
-            assert_eq!(
-                find_program(name, &search_path).as_ref(),
-                expected,
-                "{name}"
-            );
+        let local_fish = file("local", "fish", 0o755);
+        let usr_fish = file("usr", "fish", 0o755);
+        let zsh = file("bin", "zsh", 0o755);
+        let not_executable = file("bin", "nu", 0o644);
+        let dir = |name: &str| root.path().join(name).display().to_string();
+        let search_path = [dir("local"), dir("usr"), String::new(), dir("bin")].join(":");
+        Programs {
+            _root: root,
+            search_path,
+            local_fish,
+            usr_fish,
+            zsh,
+            not_executable,
         }
     }
 
     #[test]
-    fn term_fallback__described_or_not() {
-        let dirs = [
-            PathBuf::from("/usr/share/terminfo"),
-            PathBuf::from("/lib/terminfo"),
+    fn find_program__name_or_path_of_an_executable__where_it_is() {
+        let programs = programs();
+        let cases = [
+            (
+                "a name in two folders: the first",
+                "fish",
+                &programs.local_fish,
+            ),
+            ("a name past an empty entry", "zsh", &programs.zsh),
+            (
+                "an absolute path",
+                programs.usr_fish.to_str().unwrap(),
+                &programs.usr_fish,
+            ),
         ];
-        let present = [
+        for (case, name, expected) in cases {
+            let found = find_program(name, &programs.search_path);
+
+            assert_eq!(found.as_ref(), Some(expected), "{case}");
+        }
+    }
+
+    #[test]
+    fn find_program__missing_or_not_executable__none() {
+        let programs = programs();
+        let cases = [
+            ("a name, not executable", "nu"),
+            (
+                "a path, not executable",
+                programs.not_executable.to_str().unwrap(),
+            ),
+            ("a name nowhere", "bash"),
+        ];
+        for (case, name) in cases {
+            let found = find_program(name, &programs.search_path);
+
+            assert_eq!(found, None, "{case}");
+        }
+    }
+
+    /// Terminfo folders describing xterm-256color (by letter), xterm-kitty
+    /// (by hex code) and dumb: the fake's whole filesystem.
+    fn described(path: &Path) -> bool {
+        [
             "/lib/terminfo/x/xterm-256color",
             "/usr/share/terminfo/78/xterm-kitty",
             "/lib/terminfo/d/dumb",
+        ]
+        .iter()
+        .any(|entry| Path::new(entry) == path)
+    }
+
+    fn terminfo_dirs() -> [PathBuf; 2] {
+        [
+            PathBuf::from("/usr/share/terminfo"),
+            PathBuf::from("/lib/terminfo"),
+        ]
+    }
+
+    /// Whether a path exists, as the fake filesystem says.
+    type Exists<'a> = &'a dyn Fn(&Path) -> bool;
+
+    #[test]
+    fn term_fallback__described_unset_or_the_fallback_itself__none() {
+        let nowhere = |_: &Path| false;
+        let cases: [(&str, &str, Exists); 5] = [
+            ("described under its letter", "xterm-256color", &described),
+            ("described under its hex code", "xterm-kitty", &described),
+            ("described, short", "dumb", &described),
+            ("unset", "", &described),
+            ("the fallback, even undescribed", "xterm-256color", &nowhere),
         ];
-        let exists = |path: &Path| present.iter().any(|entry| Path::new(entry) == path);
-        let cases = [
-            ("xterm-256color", None),
-            ("xterm-kitty", None),
-            ("dumb", None),
-            ("xterm-ghostty", Some("xterm-256color")),
-            ("", None),
-        ];
-        for (term, expected) in cases {
-            assert_eq!(term_fallback(term, &dirs, exists), expected, "{term:?}");
+        for (case, term, exists) in cases {
+            let fallback = term_fallback(term, &terminfo_dirs(), exists);
+
+            assert_eq!(fallback, None, "{case}");
         }
+    }
+
+    #[test]
+    fn term_fallback__not_described__xterm_256color() {
+        let fallback = term_fallback("xterm-ghostty", &terminfo_dirs(), described);
+
+        assert_eq!(fallback, Some("xterm-256color"));
+    }
+
+    /// The program and arguments of `process`.
+    fn command_line(process: &Command) -> (&OsStr, Vec<&OsStr>) {
+        (process.get_program(), process.get_args().collect())
     }
 
     #[test]
     fn user_command__no_command__runs_the_shell() {
         let process = user_command(&sally(), Path::new("/bin/bash"), &[]);
 
-        assert_eq!(process.get_program(), "/bin/bash");
-        assert_eq!(process.get_args().count(), 0);
+        let (program, args) = command_line(&process);
+        assert_eq!((program, args), (OsStr::new("/bin/bash"), vec![]));
     }
 
     #[test]
@@ -666,8 +745,11 @@ mod tests {
 
         let process = user_command(&sally(), Path::new("/bin/bash"), &command);
 
-        assert_eq!(process.get_program(), "cargo");
-        assert_eq!(process.get_args().collect::<Vec<_>>(), [OsStr::new("test")]);
+        let (program, args) = command_line(&process);
+        assert_eq!(
+            (program, args),
+            (OsStr::new("cargo"), vec![OsStr::new("test")])
+        );
     }
 
     #[test]
@@ -684,23 +766,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_hooks__env_value__commands_in_order_or_refused() {
-        let cases: [(Option<&str>, Option<&[&str]>); 5] = [
-            (None, Some(&[])),
+    fn parse_hooks__unset_or_a_json_array__its_commands_in_order() {
+        let cases: [(&str, Option<&str>, &[&str]); 3] = [
+            ("unset", None, &[]),
             (
+                "two",
                 Some(r#"["npm ci","echo \"a b\""]"#),
-                Some(&["npm ci", "echo \"a b\""]),
+                &["npm ci", "echo \"a b\""],
             ),
-            (Some("[]"), Some(&[])),
-            (Some("npm ci"), None),
-            (Some(r#"{"create":"npm ci"}"#), None),
+            ("empty", Some("[]"), &[]),
         ];
-        for (value, expected) in cases {
-            let parsed = parse_hooks(value.map(OsStr::new)).ok();
+        for (case, value, expected) in cases {
+            let parsed = parse_hooks(value.map(OsStr::new)).unwrap();
 
-            let expected =
-                expected.map(|commands| commands.iter().map(|c| c.to_string()).collect());
-            assert_eq!(parsed, expected, "{value:?}");
+            assert_eq!(parsed, expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn parse_hooks__not_a_json_array__refused() {
+        let cases = [
+            ("a bare command", "npm ci"),
+            ("an object", r#"{"create":"npm ci"}"#),
+        ];
+        for (case, value) in cases {
+            let result = parse_hooks(Some(OsStr::new(value)));
+
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(
+                message.contains("not a JSON array of commands"),
+                "{case}: {message}"
+            );
         }
     }
 
@@ -715,21 +811,40 @@ mod tests {
     }
 
     #[test]
-    fn hook_command__command__sh_c_as_the_user_in_the_repository() {
+    fn hook_command__command__vz_as_user_running_sh_c() {
         let process = npm_ci_hook();
 
-        assert_eq!(process.get_program(), ENTRYPOINT_PATH);
+        let (program, args) = command_line(&process);
         assert_eq!(
-            process.get_args().collect::<Vec<_>>(),
-            ["as-user", "--", "/bin/sh", "-c", "npm ci"].map(OsStr::new)
+            (program, args),
+            (
+                OsStr::new(ENTRYPOINT_PATH),
+                ["as-user", "--", "/bin/sh", "-c", "npm ci"]
+                    .map(OsStr::new)
+                    .to_vec()
+            )
         );
-        assert_eq!(
-            process.get_current_dir(),
-            Some(Path::new("/home/sally/repos/app"))
-        );
+    }
+
+    #[test]
+    fn hook_command__any__in_the_repository() {
+        let process = npm_ci_hook();
+
+        let dir = process.get_current_dir();
+
+        assert_eq!(dir, Some(Path::new("/home/sally/repos/app")));
+    }
+
+    #[test]
+    fn hook_command__any__the_user_and_the_interactive_shell_named() {
+        let process = npm_ci_hook();
+
         let env: BTreeMap<&OsStr, Option<&OsStr>> = process.get_envs().collect();
-        assert_eq!(env[OsStr::new("USER")], Some(OsStr::new("sally")));
-        assert_eq!(env[OsStr::new("SHELL")], Some(OsStr::new("/bin/bash")));
+        let named = (env[OsStr::new("USER")], env[OsStr::new("SHELL")]);
+        assert_eq!(
+            named,
+            (Some(OsStr::new("sally")), Some(OsStr::new("/bin/bash")))
+        );
     }
 
     /// The hook's arguments after the binary parse back into `as-user`.
@@ -747,7 +862,8 @@ mod tests {
     }
 
     /// What `ensure_created` did: whether it succeeded, how often the hooks
-    /// ran, and the marker files it left.
+    /// ran, and the marker files it left. One outcome, compared whole: the
+    /// three together say what the markers did.
     #[derive(Debug, PartialEq)]
     struct Created {
         ok: bool,
@@ -883,7 +999,9 @@ mod tests {
             ("plain\\x", b"plain\\x"),
         ];
         for (field, expected) in cases {
-            assert_eq!(unescape_octal(field), expected, "field: {field}");
+            let unescaped = unescape_octal(field);
+
+            assert_eq!(unescaped, expected, "field: {field}");
         }
     }
 }

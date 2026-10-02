@@ -1,0 +1,14 @@
+# Sally's configuration: the default, then her mounts, values and tools on top.
+# Run it with `vz new -c sally`, or VZ_CONFIG=sally. Whether it is checked in
+# is hers to decide; vz reads it either way.
+name: sally
+extends: default
+image: { dockerfile: sally.Dockerfile }   # ARG BASE: stacks on the default's image
+
+mounts:
+  - ~/shared:rw                   # the same path: now writable, for her
+  - ~/mine                        # and one only she has
+
+env:
+  defaults:
+    WHO: sally

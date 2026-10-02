@@ -1,0 +1,22 @@
+# The toolchain to build viz-shell, on the library's Debian: Rust pinned in
+# rust-toolchain.toml, just, and vz built from this checkout. `vz new` runs it;
+# dev.vz.yml adds the developer tooling: `vz new -c dev`.
+name: default
+extends: vz-debian-trixie
+image: { dockerfile: Dockerfile }
+
+state:
+  # Crate downloads: the image keeps CARGO_HOME at /usr/local/cargo.
+  - /usr/local/cargo/registry
+
+share:
+  # The host's daemon: `vz -- just examples` runs the example tests from inside.
+  docker: true
+
+env:
+  defaults:
+    RUST_LOG: info
+    CARGO_TERM_COLOR: always
+  files:
+    # This repository's own, never committed (.gitignore); skipped when missing.
+    - .env

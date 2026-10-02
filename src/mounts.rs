@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail, ensure};
 use tracing::debug;
 
-use crate::config::{ConfigFile, MountEntry, MountMode, StateKind, expand_path};
+use crate::config::{MountEntry, MountMode, StateKind, expand_path};
 use crate::state::StateMount;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +21,7 @@ pub struct HostMount {
     /// creates as the user so the engine does not create it as root.
     pub point_in_state: Option<PathBuf>,
     /// The configuration file that set it last.
-    pub file: ConfigFile,
+    pub file: PathBuf,
 }
 
 /// A mount may land inside a state folder, but not hold one or replace one:
@@ -81,7 +81,7 @@ pub fn plan(
                 target,
                 read_only: entry.mode == MountMode::Ro,
                 point_in_state,
-                file: entry.file,
+                file: entry.file.clone(),
             })
         })
         .collect()
@@ -135,7 +135,7 @@ mod tests {
             path: path.to_owned(),
             target: target.map(str::to_owned),
             mode,
-            file: ConfigFile::Repository,
+            file: PathBuf::from("/home/sally/repos/app/app.vz.yml"),
         }
     }
 
@@ -154,7 +154,7 @@ mod tests {
             target: PathBuf::from(target),
             read_only,
             point_in_state: None,
-            file: ConfigFile::Repository,
+            file: PathBuf::from("/home/sally/repos/app/app.vz.yml"),
         }
     }
 
@@ -223,13 +223,30 @@ mod tests {
             ..state_dir("/home/sally/.gitconfig")
         };
         let state = [state_dir("/home/sally/.config/gh"), file];
-        let targets = ["~/.config", "~/.config/gh", "~/.gitconfig/x"];
-        for target in targets {
+        let cases = [
+            (
+                "holding a state folder",
+                "~/.config",
+                "mount at /home/sally/.config holds state path /home/sally/.config/gh",
+            ),
+            (
+                "on a state folder",
+                "~/.config/gh",
+                "mount at /home/sally/.config/gh holds state path /home/sally/.config/gh",
+            ),
+            (
+                "inside a state file",
+                "~/.gitconfig/x",
+                "mount at /home/sally/.gitconfig/x lies inside state file /home/sally/.gitconfig",
+            ),
+        ];
+        for (case, target, expected) in cases {
             let entries = [entry("~/x", Some(target), MountMode::Ro)];
 
             let result = plan(&entries, Path::new(HOME), &state, Path::new(REPO));
 
-            assert!(result.is_err(), "target: {target}");
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(message.contains(expected), "{case}: {message}");
         }
     }
 
@@ -243,34 +260,54 @@ mod tests {
         assert_eq!(mounts[0].point_in_state, None);
     }
 
-    #[test]
-    fn create_points_in_state__folder_or_file__created_once_as_the_user() {
+    /// A throwaway root holding a folder `skills` and a file `AGENTS.md`,
+    /// each mounted inside the state folder `state/…/.config/opencode`.
+    fn mounts_in_state() -> (tempfile::TempDir, [HostMount; 2]) {
         let root = tempfile::tempdir().unwrap();
-        let dir_source = root.path().join("skills");
-        let file_source = root.path().join("AGENTS.md");
-        std::fs::create_dir(&dir_source).unwrap();
-        std::fs::write(&file_source, "orientation").unwrap();
-        let state = root.path().join("state/home/sally/.config/opencode");
-        let mount = |source: &Path, name: &str| HostMount {
-            source: source.to_owned(),
+        std::fs::create_dir(root.path().join("skills")).unwrap();
+        std::fs::write(root.path().join("AGENTS.md"), "orientation").unwrap();
+        let mount = |name: &str| HostMount {
+            source: root.path().join(name),
             target: PathBuf::from("/home/sally/.config/opencode").join(name),
             read_only: true,
-            point_in_state: Some(state.join(name)),
-            file: ConfigFile::Repository,
+            point_in_state: Some(root.path().join(POINTS).join(name)),
+            file: PathBuf::from("/home/sally/repos/app/app.vz.yml"),
         };
-        let mounts = [
-            mount(&dir_source, "skills"),
-            mount(&file_source, "AGENTS.md"),
-        ];
+        let mounts = [mount("skills"), mount("AGENTS.md")];
+        (root, mounts)
+    }
+
+    /// Where the mount points of [`mounts_in_state`] go, below its root.
+    const POINTS: &str = "state/home/sally/.config/opencode";
+
+    #[test]
+    fn create_points_in_state__folder_source__a_folder() {
+        let (root, mounts) = mounts_in_state();
 
         create_points_in_state(&mounts).unwrap();
-        std::fs::write(state.join("AGENTS.md"), "kept").unwrap();
+
+        assert!(root.path().join(POINTS).join("skills").is_dir());
+    }
+
+    #[test]
+    fn create_points_in_state__file_source__an_empty_file() {
+        let (root, mounts) = mounts_in_state();
+
         create_points_in_state(&mounts).unwrap();
 
-        assert!(state.join("skills").is_dir());
-        assert_eq!(
-            std::fs::read_to_string(state.join("AGENTS.md")).unwrap(),
-            "kept"
-        );
+        let point = std::fs::read_to_string(root.path().join(POINTS).join("AGENTS.md")).unwrap();
+        assert_eq!(point, "");
+    }
+
+    #[test]
+    fn create_points_in_state__point_exists__kept() {
+        let (root, mounts) = mounts_in_state();
+        let point = root.path().join(POINTS).join("AGENTS.md");
+        std::fs::create_dir_all(point.parent().unwrap()).unwrap();
+        std::fs::write(&point, "kept").unwrap();
+
+        create_points_in_state(&mounts).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&point).unwrap(), "kept");
     }
 }

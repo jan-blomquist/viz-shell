@@ -1,0 +1,9 @@
+# A configuration that extends nothing: its image is the reference alone.
+name: pulled
+image: debian:stable-slim
+
+---
+# Pulled, then tools on the reference.
+name: pulled-tools
+extends: pulled
+image: { dockerfile: tools.Dockerfile }

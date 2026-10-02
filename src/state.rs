@@ -65,7 +65,7 @@ pub fn create_sources(mounts: &[StateMount]) -> anyhow::Result<()> {
         let is_dir = source.is_dir();
         ensure!(
             is_dir == (mount.kind == StateKind::Dir),
-            "{} is a {}, but vz.yml declares a {:?}",
+            "{} is a {}, but the configuration declares a {:?}",
             source.display(),
             if is_dir { "folder" } else { "file" },
             mount.kind
@@ -142,8 +142,24 @@ mod tests {
 
     #[test]
     fn plan__path_overlapping_the_repository__is_refused() {
-        let paths = ["~/repos", "~/repos/app", "~/repos/app/target"];
-        for path in paths {
+        let cases = [
+            (
+                "holding it",
+                "~/repos",
+                "state path `~/repos` overlaps the repository at /home/sally/repos/app",
+            ),
+            (
+                "on it",
+                "~/repos/app",
+                "state path `~/repos/app` overlaps the repository at /home/sally/repos/app",
+            ),
+            (
+                "inside it",
+                "~/repos/app/target",
+                "state path `~/repos/app/target` overlaps the repository at /home/sally/repos/app",
+            ),
+        ];
+        for (case, path, expected) in cases {
             let entries = [entry(path, StateKind::Dir, None)];
 
             let result = plan(
@@ -153,7 +169,8 @@ mod tests {
                 Path::new(REPO),
             );
 
-            assert!(result.is_err(), "path: {path}");
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(message.contains(expected), "{case}: {message}");
         }
     }
 
@@ -175,7 +192,8 @@ mod tests {
 
         create_sources(&[file_mount(source.clone(), Some("{}"))]).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "{}");
+        let content = std::fs::read_to_string(&source).unwrap();
+        assert_eq!(content, "{}");
     }
 
     #[test]
@@ -186,10 +204,8 @@ mod tests {
 
         create_sources(&[file_mount(source.clone(), Some("{}"))]).unwrap();
 
-        assert_eq!(
-            std::fs::read_to_string(&source).unwrap(),
-            r#"{"kept":true}"#
-        );
+        let content = std::fs::read_to_string(&source).unwrap();
+        assert_eq!(content, r#"{"kept":true}"#);
     }
 
     #[test]
@@ -214,7 +230,11 @@ mod tests {
 
         let result = create_sources(&[file_mount(cache.path().to_owned(), None)]);
 
-        assert!(result.is_err());
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("is a folder, but the configuration declares a File"),
+            "{message}"
+        );
     }
 
     #[test]

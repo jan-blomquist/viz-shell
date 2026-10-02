@@ -1,0 +1,4 @@
+# Configurations that extend each other: refused, naming the cycle.
+name: a
+image: debian:stable-slim
+extends: b

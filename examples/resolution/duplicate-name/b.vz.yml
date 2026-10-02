@@ -1,0 +1,3 @@
+# Named ci too: one name, one configuration per scope; refused, naming both files.
+name: ci
+image: alpine:3

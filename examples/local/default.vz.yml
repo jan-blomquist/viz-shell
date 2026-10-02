@@ -1,0 +1,10 @@
+# The repository's default: what everyone who clones the repository gets.
+name: default
+image: debian:stable-slim
+
+mounts:
+  - ~/shared                      # read-only for everyone
+
+env:
+  defaults:
+    WHO: repo

@@ -2,12 +2,8 @@ debug
 target
 
 .vz_state/
-# env files hold secrets: vz warns about a tracked one
+# env files hold secrets
 .env
-# local configuration is personal; the example's is tracked on purpose
-*.local.yml
-*.local.yaml
-!examples/**/vz.local.yml
 .idea/
 # agent worktrees and local settings
 .claude/

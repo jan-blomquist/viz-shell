@@ -1,0 +1,5 @@
+# The former `profiles:` block: refused, saying what to write instead.
+image: debian:stable-slim
+profiles:
+  ci:
+    shell: sh

@@ -1,0 +1,3 @@
+# The other library folder that holds `trusted`.
+name: trusted
+share: { docker: true }

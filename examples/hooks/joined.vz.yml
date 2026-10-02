@@ -1,0 +1,6 @@
+# Joined with `attach: true`: the next vz enters the same container, so attach
+# runs again and create does not.
+name: joined
+extends: default
+persistent: true
+attach: true

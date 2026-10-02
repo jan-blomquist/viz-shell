@@ -1,0 +1,21 @@
+# A repository's configurations, as this example's test copies them into a
+# repository. Its default goes without a name, and extends the library's base
+# by name.
+extends: vz-debian-trixie
+env:
+  defaults:
+    WHO: repo
+
+---
+# The repository's `trusted`, on the library's `trusted`: a configuration
+# never extends itself.
+name: trusted
+extends: trusted
+env:
+  defaults:
+    WHO: repo-trusted
+
+---
+# On the repository's `trusted`, found before the library's.
+name: ci
+extends: trusted

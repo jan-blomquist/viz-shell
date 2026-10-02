@@ -1,0 +1,5 @@
+# `extends` names a configuration no file holds: refused, listing the folders
+# scanned and the configurations found.
+name: ci
+image: debian:stable-slim
+extends: nope

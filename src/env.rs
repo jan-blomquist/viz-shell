@@ -289,68 +289,110 @@ mod tests {
 
         let kept = without_reserved(environment, &["HOME", "VZ_UID"]);
 
-        assert_eq!(kept.keys().collect::<Vec<_>>(), ["KEEP"]);
+        let names: Vec<&String> = kept.keys().collect();
+        assert_eq!(names, ["KEEP"]);
     }
 
     #[test]
-    fn glob_matches__cases() {
+    fn glob_matches__a_name_the_pattern_covers__matches() {
         let cases = [
-            ("GH_TOKEN", "GH_TOKEN", true),
-            ("GH_TOKEN", "GH_TOKEN_X", false),
-            ("FMP_*", "FMP_API_KEY", true),
-            ("FMP_*", "FMP_", true),
-            ("FMP_*", "XFMP_A", false),
-            ("*_TOKEN", "GH_TOKEN", true),
-            ("A?C", "ABC", true),
-            ("A?C", "AC", false),
-            ("*", "ANY", true),
-            ("A*B*C", "AXXBYYC", true),
-            ("A*B*C", "AXXBYY", false),
+            ("GH_TOKEN", "GH_TOKEN"),
+            ("FMP_*", "FMP_API_KEY"),
+            ("FMP_*", "FMP_"),
+            ("*_TOKEN", "GH_TOKEN"),
+            ("A?C", "ABC"),
+            ("*", "ANY"),
+            ("A*B*C", "AXXBYYC"),
         ];
-        for (pattern, name, expected) in cases {
-            assert_eq!(glob_matches(pattern, name), expected, "{pattern} ~ {name}");
+        for (pattern, name) in cases {
+            let matches = glob_matches(pattern, name);
+
+            assert!(matches, "{pattern} ~ {name}");
         }
     }
 
     #[test]
-    fn cli_env_parse__forms() {
-        assert_eq!(
-            CliEnv::parse("A=1=2").unwrap(),
-            CliEnv::Value("A".to_owned(), "1=2".to_owned())
-        );
-        assert_eq!(
-            CliEnv::parse("A=").unwrap(),
-            CliEnv::Value("A".to_owned(), String::new())
-        );
-        assert_eq!(
-            CliEnv::parse("GH_TOKEN").unwrap(),
-            CliEnv::FromHost("GH_TOKEN".to_owned())
-        );
-        assert!(CliEnv::parse("MY-VAR=x").is_err());
+    fn glob_matches__any_other_name__no_match() {
+        let cases = [
+            ("GH_TOKEN", "GH_TOKEN_X"),
+            ("FMP_*", "XFMP_A"),
+            ("A?C", "AC"),
+            ("A*B*C", "AXXBYY"),
+        ];
+        for (pattern, name) in cases {
+            let matches = glob_matches(pattern, name);
+
+            assert!(!matches, "{pattern} ~ {name}");
+        }
     }
 
     #[test]
-    fn load_files__required_missing__is_refused_optional_missing__skipped() {
+    fn cli_env_parse__name_equals_value__a_value_split_at_the_first_equals() {
+        let cases = [("A=1=2", "A", "1=2"), ("A=", "A", "")];
+        for (arg, name, value) in cases {
+            let parsed = CliEnv::parse(arg).unwrap();
+
+            assert_eq!(
+                parsed,
+                CliEnv::Value(name.to_owned(), value.to_owned()),
+                "{arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_env_parse__a_bare_name__copied_from_the_host() {
+        let parsed = CliEnv::parse("GH_TOKEN").unwrap();
+
+        assert_eq!(parsed, CliEnv::FromHost("GH_TOKEN".to_owned()));
+    }
+
+    #[test]
+    fn cli_env_parse__not_a_variable_name__refused_naming_it() {
+        let result = CliEnv::parse("MY-VAR=x");
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("--env MY-VAR=x: `MY-VAR` is not a variable name"),
+            "{message}"
+        );
+    }
+
+    /// `.env`, `required` or not, in an empty folder.
+    fn missing_env_file(required: bool) -> (tempfile::TempDir, EnvFile) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            config_dir: dir.path(),
-            repo_root: dir.path(),
-            home: dir.path(),
-        };
-        let required = EnvFile {
+        let file = EnvFile {
             path: ".env".to_owned(),
-            required: true,
+            required,
         };
-        let optional = EnvFile {
-            path: ".env".to_owned(),
-            required: false,
-        };
+        (dir, file)
+    }
 
-        let refused = load_files(&[required], &paths).unwrap_err().to_string();
-        let skipped = load_files(&[optional], &paths).unwrap();
+    fn paths_in(dir: &Path) -> Paths<'_> {
+        Paths {
+            config_dir: dir,
+            repo_root: dir,
+            home: dir,
+        }
+    }
 
-        assert!(refused.contains("does not exist"), "{refused}");
-        assert_eq!(skipped, vec![]);
+    #[test]
+    fn load_files__required_missing__is_refused() {
+        let (dir, required) = missing_env_file(true);
+
+        let result = load_files(&[required], &paths_in(dir.path()));
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains(".env does not exist"), "{message}");
+    }
+
+    #[test]
+    fn load_files__optional_missing__skipped() {
+        let (dir, optional) = missing_env_file(false);
+
+        let loaded = load_files(&[optional], &paths_in(dir.path())).unwrap();
+
+        assert_eq!(loaded, []);
     }
 
     #[test]
@@ -379,41 +421,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn load_files__tracked_by_git__loaded_with_a_warning() {
+    /// Runs git in `dir`; a failure is a broken arrange, not a result.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A git repository whose `.env`, `SECRET=1`, git tracks: the files
+    /// read from it, and what was logged while reading.
+    fn load_tracked_env_file() -> (Vec<LoadedFile>, String) {
         let repo = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(repo.path())
-                .args(args)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap();
-            assert!(status.success(), "git {args:?}");
-        };
-        git(&["init", "-q"]);
+        git(repo.path(), &["init", "-q"]);
         std::fs::write(repo.path().join(".env"), "SECRET=1\n").unwrap();
-        git(&["add", ".env"]);
-        let paths = Paths {
-            config_dir: repo.path(),
-            repo_root: repo.path(),
-            home: repo.path(),
-        };
+        git(repo.path(), &["add", ".env"]);
         let file = EnvFile {
             path: ".env".to_owned(),
             required: true,
         };
-
         let log = Log::default();
-
         let loaded = tracing::subscriber::with_default(log.subscriber(), || {
-            load_files(&[file], &paths).unwrap()
+            load_files(&[file], &paths_in(repo.path())).unwrap()
         });
+        (loaded, log.text())
+    }
+
+    #[test]
+    fn load_files__tracked_by_git__still_loaded() {
+        let (loaded, _) = load_tracked_env_file();
 
         assert_eq!(loaded[0].vars, pairs(&[("SECRET", "1")]));
-        let log = log.text();
+    }
+
+    #[test]
+    fn load_files__tracked_by_git__a_warning_logged() {
+        let (_, log) = load_tracked_env_file();
+
         assert!(log.contains("is tracked by git"), "{log}");
     }
 

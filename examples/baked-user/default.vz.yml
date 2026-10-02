@@ -1,0 +1,5 @@
+# The Dockerfile declares VZ_USER, VZ_UID, VZ_GID, VZ_GROUP and VZ_HOME, so vz
+# passes your values and the image is built per user, with your home baked in.
+name: default
+image:
+  dockerfile: Dockerfile

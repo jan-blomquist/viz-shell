@@ -9,7 +9,7 @@ use docker_wrapper::{DockerCommand, ExecCommand, RunCommand};
 
 use crate::config::EffectiveHooks;
 use crate::constants::{
-    CONTAINER_ENV, CONTAINER_PROFILE_ENV, CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES,
+    CONTAINER_CONFIG_ENV, CONTAINER_ENV, CONTAINER_ROOT, ENTRYPOINT_PATH, FLOOR_CAPABILITIES,
     FLOOR_PIDS_LIMIT, HOOKS_ATTACH_ENV, HOOKS_CREATE_ENV, HOST_ALIAS, NO_NEW_PRIVILEGES, REPO_ENV,
     SESSION_DIR, SHELL_ENV, SUDO_ENV,
 };
@@ -21,8 +21,8 @@ use crate::user::User;
 pub struct Session<'a> {
     /// The container's name, and its hostname.
     pub name: &'a str,
-    /// The profile it runs, told to the shell with the name.
-    pub profile: Option<&'a str>,
+    /// The configuration it runs, told to the shell with the name.
+    pub config: Option<&'a str>,
     pub labels: &'a [(String, String)],
     /// Kept after the creating shell exits: the container holds, and every
     /// shell attaches, the first included.
@@ -125,8 +125,8 @@ impl Session<'_> {
         }
         run = run.env(REPO_ENV, self.repo_root.to_string_lossy());
         run = run.env(CONTAINER_ENV, self.name);
-        if let Some(profile) = self.profile {
-            run = run.env(CONTAINER_PROFILE_ENV, profile);
+        if let Some(config) = self.config {
+            run = run.env(CONTAINER_CONFIG_ENV, config);
         }
         let docker_env = self.docker.map(DockerSocket::env).into_iter().flatten();
         let env: Vec<(String, String)> = self
@@ -282,7 +282,7 @@ mod tests {
 
     use super::*;
     use crate::cli::{Action, Cli};
-    use crate::config::{ConfigFile, StateKind};
+    use crate::config::StateKind;
 
     fn sally() -> User {
         User {
@@ -324,14 +324,14 @@ mod tests {
                 target: PathBuf::from("/home/sally/repos"),
                 read_only: true,
                 point_in_state: None,
-                file: ConfigFile::Repository,
+                file: PathBuf::from("/home/sally/repos/vz/default.vz.yml"),
             },
             HostMount {
                 source: PathBuf::from("/home/sally/repos/skills"),
                 target: PathBuf::from("/home/sally/.agents/skills"),
                 read_only: true,
                 point_in_state: None,
-                file: ConfigFile::Repository,
+                file: PathBuf::from("/home/sally/repos/vz/default.vz.yml"),
             },
         ];
         let docker = DockerSocket {
@@ -345,7 +345,7 @@ mod tests {
         let hooks = EffectiveHooks::default();
         let mut session = Session {
             name: "vz-0-vz",
-            profile: None,
+            config: None,
             labels: &labels,
             persistent: false,
             image: "vz-vz:abc",
@@ -373,26 +373,40 @@ mod tests {
         args.windows(2).any(|pair| pair == [flag, value])
     }
 
+    /// Whether any argument is `arg`: a lone flag such as `--tty`.
+    fn has_arg(args: &[String], arg: &str) -> bool {
+        args.iter().any(|each| each == arg)
+    }
+
+    /// Whether any argument starts with `prefix`: a variable set at all.
+    fn has_prefix(args: &[String], prefix: &str) -> bool {
+        args.iter().any(|arg| arg.starts_with(prefix))
+    }
+
+    /// The arguments after the first `marker`, with `vz` before them: what
+    /// the cli inside the container parses.
+    fn after(args: &[String], marker: &str) -> Vec<String> {
+        let position = args.iter().position(|arg| arg == marker).unwrap();
+        std::iter::once("vz".to_owned())
+            .chain(args[position + 1..].iter().cloned())
+            .collect()
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
     #[test]
     fn run_command__any_session__mounts_repo_at_same_path_and_vz_read_only() {
         let args = args_for(&[], true);
 
-        assert!(
-            has(
-                &args,
-                "--mount",
-                "type=bind,src=/home/sally/repos/vz,dst=/home/sally/repos/vz"
-            ),
-            "{args:?}"
-        );
-        assert!(
-            has(
-                &args,
-                "--mount",
-                "type=bind,src=/home/sally/.local/bin/viz-shell,dst=/run/viz-shell/viz-shell,readonly"
-            ),
-            "{args:?}"
-        );
+        let expected = [
+            "type=bind,src=/home/sally/repos/vz,dst=/home/sally/repos/vz",
+            "type=bind,src=/home/sally/.local/bin/viz-shell,dst=/run/viz-shell/viz-shell,readonly",
+        ];
+        for mount in expected {
+            assert!(has(&args, "--mount", mount), "{mount}: {args:?}");
+        }
     }
 
     #[test]
@@ -413,33 +427,34 @@ mod tests {
     fn run_command__any_session__starts_the_entrypoint_as_root_in_the_workdir() {
         let args = args_for(&[], true);
 
-        assert!(has(&args, "--user", "0:0"), "{args:?}");
-        assert!(
-            has(&args, "--entrypoint", "/run/viz-shell/viz-shell"),
-            "{args:?}"
-        );
-        assert!(
-            has(&args, "--workdir", "/home/sally/repos/vz/src"),
-            "{args:?}"
-        );
+        let expected = [
+            ("--user", "0:0"),
+            ("--entrypoint", "/run/viz-shell/viz-shell"),
+            ("--workdir", "/home/sally/repos/vz/src"),
+        ];
+        for (flag, value) in expected {
+            assert!(has(&args, flag, value), "{flag} {value}: {args:?}");
+        }
     }
 
     #[test]
     fn run_command__any_session__carries_user_and_passthrough_env() {
         let args = args_for(&[], true);
 
-        assert!(has(&args, "--env", "VZ_UID=1000"), "{args:?}");
-        assert!(has(&args, "--env", "HOME=/home/sally"), "{args:?}");
-        assert!(
-            has(&args, "--env", "VZ_REPO=/home/sally/repos/vz"),
-            "{args:?}"
-        );
-        assert!(has(&args, "--env", "TERM=xterm-256color"), "{args:?}");
+        let expected = [
+            "VZ_UID=1000",
+            "HOME=/home/sally",
+            "VZ_REPO=/home/sally/repos/vz",
+            "TERM=xterm-256color",
+        ];
+        for env in expected {
+            assert!(has(&args, "--env", env), "{env}: {args:?}");
+        }
     }
 
     #[test]
     fn run_command__command_given__follows_image_after_entrypoint_marker() {
-        let command = ["id".to_owned(), "-u".to_owned()];
+        let command = strings(&["id", "-u"]);
 
         let args = args_for(&command, false);
 
@@ -453,14 +468,10 @@ mod tests {
     fn run_command__entrypoint_args__parse_back_to_the_same_command() {
         let cases: [&[&str]; 3] = [&[], &["id", "-u"], &["cargo", "test", "--", "--nocapture"]];
         for command in cases {
-            let command: Vec<String> = command.iter().map(|arg| arg.to_string()).collect();
+            let command = strings(command);
             let args = args_for(&command, false);
-            let after_image = args.iter().position(|arg| arg == "vz-vz:abc").unwrap() + 1;
 
-            let cli = Cli::try_parse_from(
-                std::iter::once("vz".to_owned()).chain(args[after_image..].iter().cloned()),
-            )
-            .unwrap();
+            let cli = Cli::try_parse_from(after(&args, "vz-vz:abc")).unwrap();
 
             let expected = Action::Entrypoint {
                 hold: false,
@@ -471,193 +482,253 @@ mod tests {
     }
 
     #[test]
-    fn run_args__configured_env__by_name_only() {
+    fn run_args__configured_env__passed_bare_right_after_the_subcommand() {
         let args = args_for(&[], false);
 
-        assert!(has(&args, "--env", "GH_TOKEN"), "{args:?}");
-        assert!(
-            !args.iter().any(|arg| arg.starts_with("GH_TOKEN=")),
-            "{args:?}"
-        );
         assert_eq!(&args[..3], ["create", "--env", "GH_TOKEN"]);
+    }
+
+    #[test]
+    fn run_args__configured_env__its_value_never_on_the_command_line() {
+        let args = args_for(&[], false);
+
+        assert!(!has_prefix(&args, "GH_TOKEN="), "{args:?}");
     }
 
     #[test]
     fn run_command__no_terminal__omits_tty() {
         let args = args_for(&[], false);
 
-        assert!(!args.contains(&"--tty".to_owned()), "{args:?}");
+        assert!(!has_arg(&args, "--tty"), "{args:?}");
     }
 
     #[test]
     fn run_command__docker_shared__socket_at_its_path_with_host_and_group() {
         let args = args_for(&[], true);
 
-        assert!(
-            has(
-                &args,
+        let expected = [
+            (
                 "--mount",
-                "type=bind,src=/run/user/1000/docker.sock,dst=/run/user/1000/docker.sock"
+                "type=bind,src=/run/user/1000/docker.sock,dst=/run/user/1000/docker.sock",
             ),
-            "{args:?}"
-        );
-        assert!(
-            has(
-                &args,
-                "--env",
-                "DOCKER_HOST=unix:///run/user/1000/docker.sock"
-            ),
-            "{args:?}"
-        );
-        assert!(has(&args, "--env", "VZ_GROUPS=docker:969"), "{args:?}");
+            ("--env", "DOCKER_HOST=unix:///run/user/1000/docker.sock"),
+            ("--env", "VZ_GROUPS=docker:969"),
+        ];
+        for (flag, value) in expected {
+            assert!(has(&args, flag, value), "{flag} {value}: {args:?}");
+        }
     }
 
     #[test]
     fn run_args__default__secure_floor() {
         let args = args_for(&[], false);
 
-        assert!(has(&args, "--cap-drop", "ALL"), "{args:?}");
-        for capability in ["CHOWN", "SETUID", "SETGID", "KILL"] {
-            assert!(
-                has(&args, "--cap-add", capability),
-                "{capability}: {args:?}"
-            );
+        let expected = [
+            ("--cap-drop", "ALL"),
+            ("--cap-add", "CHOWN"),
+            ("--cap-add", "SETUID"),
+            ("--cap-add", "SETGID"),
+            ("--cap-add", "KILL"),
+            ("--security-opt", "no-new-privileges"),
+            ("--pids-limit", "512"),
+        ];
+        for (flag, value) in expected {
+            assert!(has(&args, flag, value), "{flag} {value}: {args:?}");
         }
-        assert!(
-            has(&args, "--security-opt", "no-new-privileges"),
-            "{args:?}"
-        );
-        assert!(has(&args, "--pids-limit", "512"), "{args:?}");
-        assert!(!args.iter().any(|arg| arg == "VZ_SUDO=1"), "{args:?}");
     }
 
     #[test]
-    fn run_args__sudo__docker_defaults_and_the_entrypoint_told() {
+    fn run_args__default__the_entrypoint_not_told_sudo() {
+        let args = args_for(&[], false);
+
+        assert!(!has_prefix(&args, "VZ_SUDO"), "{args:?}");
+    }
+
+    #[test]
+    fn run_args__sudo__the_entrypoint_told() {
         let args = args_with(&[], false, true, false);
 
         assert!(has(&args, "--env", "VZ_SUDO=1"), "{args:?}");
-        let floor = ["--cap-drop", "--cap-add", "--security-opt", "--pids-limit"];
+    }
+
+    #[test]
+    fn run_args__sudo__docker_defaults_without_the_floor() {
+        let args = args_with(&[], false, true, false);
+
+        for flag in ["--cap-drop", "--cap-add", "--security-opt", "--pids-limit"] {
+            assert!(!has_arg(&args, flag), "{flag}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn run_args__shell_set__the_entrypoint_told() {
+        let args = args_configured(&[], false, false, false, |session| {
+            session.shell = Some("fish")
+        });
+
+        assert!(has(&args, "--env", "VZ_SHELL=fish"), "{args:?}");
+    }
+
+    #[test]
+    fn run_args__shell_unset__the_entrypoint_not_told() {
+        let args = args_for(&[], false);
+
+        assert!(!has_prefix(&args, "VZ_SHELL"), "{args:?}");
+    }
+
+    /// The arguments of a session with two create hooks and one attach hook.
+    fn hooked_args() -> Vec<String> {
+        // The session borrows it for any lifetime the helper picks.
+        let hooks = Box::leak(Box::new(EffectiveHooks {
+            create: strings(&["npm ci", "echo \"a b\""]),
+            attach: strings(&["git fetch"]),
+        }));
+        args_configured(&[], false, false, false, |session| session.hooks = hooks)
+    }
+
+    #[test]
+    fn run_command__create_hooks__a_json_array_in_env() {
+        let args = hooked_args();
+
         assert!(
-            !args.iter().any(|arg| floor.contains(&arg.as_str())),
+            has(
+                &args,
+                "--env",
+                r#"VZ_HOOKS_CREATE=["npm ci","echo \"a b\""]"#
+            ),
             "{args:?}"
         );
     }
 
     #[test]
-    fn run_args__shell__the_entrypoint_told_only_when_set() {
-        let fish = args_configured(&[], false, false, false, |session| {
-            session.shell = Some("fish")
-        });
-        let unset = args_with(&[], false, false, false);
+    fn run_command__attach_hooks__a_json_array_in_env() {
+        let args = hooked_args();
 
-        assert!(has(&fish, "--env", "VZ_SHELL=fish"), "{fish:?}");
         assert!(
-            !unset.iter().any(|arg| arg.starts_with("VZ_SHELL")),
-            "{unset:?}"
+            has(&args, "--env", r#"VZ_HOOKS_ATTACH=["git fetch"]"#),
+            "{args:?}"
         );
     }
 
     #[test]
-    fn run_command__hooks__json_arrays_in_env_only_when_set() {
-        // The session borrows it for any lifetime the helper picks.
-        let hooks = Box::leak(Box::new(EffectiveHooks {
-            create: vec!["npm ci".to_owned(), "echo \"a b\"".to_owned()],
-            attach: vec!["git fetch".to_owned()],
-        }));
-        let set = args_configured(&[], false, false, false, |session| session.hooks = hooks);
-        let unset = args_for(&[], false);
+    fn run_command__no_hooks__no_hook_env() {
+        let args = args_for(&[], false);
 
-        assert!(
-            has(
-                &set,
-                "--env",
-                r#"VZ_HOOKS_CREATE=["npm ci","echo \"a b\""]"#
-            ),
-            "{set:?}"
-        );
-        assert!(
-            has(&set, "--env", r#"VZ_HOOKS_ATTACH=["git fetch"]"#),
-            "{set:?}"
-        );
-        assert!(
-            !unset.iter().any(|arg| arg.starts_with("VZ_HOOKS")),
-            "{unset:?}"
-        );
+        assert!(!has_prefix(&args, "VZ_HOOKS"), "{args:?}");
     }
 
     #[test]
-    fn run_args__host_network__the_hosts_network_else_dockers() {
-        let shared = args_with(&[], false, false, true);
-        let default = args_with(&[], false, false, false);
+    fn run_args__host_network__the_host_s_network() {
+        let args = args_with(&[], false, false, true);
 
-        assert!(has(&shared, "--network", "host"), "{shared:?}");
-        assert!(!default.iter().any(|arg| arg == "--network"), "{default:?}");
-        // On docker's network the host has a name; on its own network, localhost.
-        let alias = "host.docker.internal:host-gateway";
-        assert!(has(&default, "--add-host", alias), "{default:?}");
-        assert!(!shared.iter().any(|arg| arg == "--add-host"), "{shared:?}");
+        assert!(has(&args, "--network", "host"), "{args:?}");
+    }
+
+    /// On its own network the host is localhost: no alias.
+    #[test]
+    fn run_args__host_network__no_host_alias() {
+        let args = args_with(&[], false, false, true);
+
+        assert!(!has_arg(&args, "--add-host"), "{args:?}");
+    }
+
+    #[test]
+    fn run_args__default__docker_s_network() {
+        let args = args_with(&[], false, false, false);
+
+        assert!(!has_arg(&args, "--network"), "{args:?}");
+    }
+
+    /// On docker's network the host has a name.
+    #[test]
+    fn run_args__default__the_host_alias() {
+        let args = args_with(&[], false, false, false);
+
+        assert!(
+            has(&args, "--add-host", "host.docker.internal:host-gateway"),
+            "{args:?}"
+        );
     }
 
     #[test]
     fn create_args__any_session__named_labeled_with_a_fresh_session_dir() {
         let args = args_for(&[], true);
 
-        assert!(has(&args, "--name", "vz-0-vz"), "{args:?}");
-        assert!(has(&args, "--hostname", "vz-0-vz"), "{args:?}");
-        assert!(has(&args, "--label", "vz.index=0"), "{args:?}");
-        assert!(has(&args, "--tmpfs", "/run/viz-shell/session"), "{args:?}");
+        let expected = [
+            ("--name", "vz-0-vz"),
+            ("--hostname", "vz-0-vz"),
+            ("--label", "vz.index=0"),
+            ("--tmpfs", "/run/viz-shell/session"),
+        ];
+        for (flag, value) in expected {
+            assert!(has(&args, flag, value), "{flag} {value}: {args:?}");
+        }
     }
 
     #[test]
-    fn create_args__any_session__tells_the_shell_its_container_and_profile() {
-        let plain = args_for(&[], false);
-        let trusted = args_configured(&[], false, false, false, |session| {
-            session.profile = Some("trusted")
+    fn create_args__any_session__tells_the_shell_its_container() {
+        let args = args_for(&[], false);
+
+        assert!(has(&args, "--env", "VZ_CONTAINER=vz-0-vz"), "{args:?}");
+    }
+
+    #[test]
+    fn create_args__a_configuration__tells_the_shell_its_name() {
+        let args = args_configured(&[], false, false, false, |session| {
+            session.config = Some("trusted")
         });
 
-        assert!(has(&plain, "--env", "VZ_CONTAINER=vz-0-vz"), "{plain:?}");
         assert!(
-            !plain
-                .iter()
-                .any(|arg| arg.starts_with("VZ_CONTAINER_PROFILE")),
-            "{plain:?}"
-        );
-        assert!(
-            has(&trusted, "--env", "VZ_CONTAINER_PROFILE=trusted"),
-            "{trusted:?}"
+            has(&args, "--env", "VZ_CONTAINER_CONFIG=trusted"),
+            "{args:?}"
         );
     }
 
     #[test]
-    fn create_args__not_persistent__removed_on_exit_running_the_command() {
-        let args = args_for(&["id".to_owned()], true);
+    fn create_args__the_default__no_configuration_told() {
+        let args = args_for(&[], false);
+
+        assert!(!has_prefix(&args, "VZ_CONTAINER_CONFIG"), "{args:?}");
+    }
+
+    #[test]
+    fn create_args__not_persistent__removed_on_exit_interactive_with_a_tty() {
+        let args = args_for(&strings(&["id"]), true);
 
         for flag in ["--rm", "--interactive", "--tty"] {
-            assert!(args.iter().any(|arg| arg == flag), "{flag}: {args:?}");
+            assert!(has_arg(&args, flag), "{flag}: {args:?}");
         }
-        assert_eq!(args[args.len() - 3..], ["entrypoint", "--", "id"]);
     }
 
     #[test]
-    fn create_args__persistent__kept_holding_for_shells_to_attach() {
-        let args = args_configured(&["id".to_owned()], true, false, false, |session| {
+    fn create_args__persistent__neither_removed_nor_interactive() {
+        let args = args_configured(&strings(&["id"]), true, false, false, |session| {
             session.persistent = true
         });
 
         for flag in ["--rm", "--interactive", "--tty"] {
-            assert!(!args.iter().any(|arg| arg == flag), "{flag}: {args:?}");
+            assert!(!has_arg(&args, flag), "{flag}: {args:?}");
         }
+    }
+
+    #[test]
+    fn create_args__persistent__the_entrypoint_holds_for_shells_to_attach() {
+        let args = args_configured(&strings(&["id"]), true, false, false, |session| {
+            session.persistent = true
+        });
+
         assert_eq!(
             args[args.len() - 3..],
             ["vz-vz:abc", "entrypoint", "--hold"]
         );
     }
 
-    #[test]
-    fn enter_args__command__vz_enters_the_container_as_the_user() {
+    /// `vz enter` of `id -u` in `vz-0-vz`, on a terminal, with `TERM`
+    /// passed through and `GH_TOKEN` configured.
+    fn enter_args() -> Vec<String> {
         let passthrough = [("TERM".to_owned(), "xterm".to_owned())];
-        let env_names = ["GH_TOKEN".to_owned()];
-        let command = ["id".to_owned(), "-u".to_owned()];
+        let env_names = strings(&["GH_TOKEN"]);
+        let command = strings(&["id", "-u"]);
         let enter = Enter {
             container: "vz-0-vz",
             workdir: Path::new("/home/sally/repos/vz"),
@@ -666,13 +737,40 @@ mod tests {
             env_names: &env_names,
             command: &command,
         };
+        enter.args()
+    }
 
-        let args = enter.args();
+    #[test]
+    fn enter_args__configured_env__by_name_right_after_exec() {
+        let args = enter_args();
 
         assert_eq!(&args[..3], ["exec", "--env", "GH_TOKEN"]);
-        assert!(has(&args, "--env", "TERM=xterm"), "{args:?}");
-        assert!(has(&args, "--workdir", "/home/sally/repos/vz"), "{args:?}");
-        assert!(args.iter().any(|arg| arg == "--tty"), "{args:?}");
+    }
+
+    #[test]
+    fn enter_args__any__passthrough_and_workdir() {
+        let args = enter_args();
+
+        let expected = [
+            ("--env", "TERM=xterm"),
+            ("--workdir", "/home/sally/repos/vz"),
+        ];
+        for (flag, value) in expected {
+            assert!(has(&args, flag, value), "{flag} {value}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn enter_args__on_a_terminal__a_tty() {
+        let args = enter_args();
+
+        assert!(has_arg(&args, "--tty"), "{args:?}");
+    }
+
+    #[test]
+    fn enter_args__command__vz_enters_the_container_as_the_user() {
+        let args = enter_args();
+
         let tail = &args[args.len() - 6..];
         assert_eq!(
             tail,
@@ -690,7 +788,7 @@ mod tests {
     /// The exec's arguments after the binary parse back into `enter`.
     #[test]
     fn enter_args__after_the_binary__parse_as_enter() {
-        let command = ["cargo".to_owned(), "test".to_owned(), "--".to_owned()];
+        let command = strings(&["cargo", "test", "--"]);
         let enter = Enter {
             container: "vz-0-vz",
             workdir: Path::new("/"),
@@ -700,12 +798,8 @@ mod tests {
             command: &command,
         };
         let args = enter.args();
-        let after_binary = args.iter().position(|arg| arg == ENTRYPOINT_PATH).unwrap() + 1;
 
-        let cli = Cli::try_parse_from(
-            std::iter::once("vz".to_owned()).chain(args[after_binary..].iter().cloned()),
-        )
-        .unwrap();
+        let cli = Cli::try_parse_from(after(&args, ENTRYPOINT_PATH)).unwrap();
 
         let expected = Action::Enter {
             command: command.to_vec(),
@@ -713,9 +807,10 @@ mod tests {
         assert_eq!(cli.action, Some(expected));
     }
 
-    #[test]
-    fn check_binary_reachable__cases() {
-        let mounts: Vec<PathBuf> = [
+    /// A vz container's mount table: `/`, `/proc`, `~/repos`, the
+    /// repository, and vz's own binary.
+    fn mount_table() -> Vec<PathBuf> {
+        [
             "/",
             "/proc",
             "/home/sally/repos",
@@ -724,23 +819,57 @@ mod tests {
         ]
         .iter()
         .map(PathBuf::from)
-        .collect();
-        let built = "/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/viz-shell";
-        let cases = [
-            // Outside a vz container, anything goes.
-            (None, "/run/viz-shell/viz-shell", true),
-            // On a same-path mount: the repository, or a sibling under ~/repos.
-            (Some(&mounts[..]), built, true),
-            (Some(&mounts[..]), "/home/sally/repos/other/viz-shell", true),
-            // The self-mount, or the image itself.
-            (Some(&mounts[..]), "/run/viz-shell/viz-shell", false),
-            (Some(&mounts[..]), "/usr/local/bin/viz-shell", false),
-        ];
-        for (mounts, binary, reachable) in cases {
-            let inside_vz = mounts.is_some();
-            let result = check_binary_reachable(Path::new(binary), mounts);
+        .collect()
+    }
 
-            assert_eq!(result.is_ok(), reachable, "{inside_vz} {binary}");
+    #[test]
+    fn check_binary_reachable__outside_a_vz_container__accepted() {
+        const OUTSIDE_A_VZ_CONTAINER: Option<&[PathBuf]> = None;
+
+        let result = check_binary_reachable(
+            Path::new("/run/viz-shell/viz-shell"),
+            OUTSIDE_A_VZ_CONTAINER,
+        );
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn check_binary_reachable__on_a_same_path_mount__accepted() {
+        let mounts = mount_table();
+        let cases = [
+            (
+                "the repository",
+                "/home/sally/repos/vz/target/x86_64-unknown-linux-musl/release/viz-shell",
+            ),
+            (
+                "a sibling under ~/repos",
+                "/home/sally/repos/other/viz-shell",
+            ),
+        ];
+        for (case, binary) in cases {
+            let result = check_binary_reachable(Path::new(binary), Some(&mounts));
+
+            assert!(result.is_ok(), "{case}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn check_binary_reachable__self_mount_or_the_image__refused() {
+        let mounts = mount_table();
+        let cases = [
+            ("the self-mount", "/run/viz-shell/viz-shell"),
+            ("the image itself", "/usr/local/bin/viz-shell"),
+        ];
+        for (case, binary) in cases {
+            let result = check_binary_reachable(Path::new(binary), Some(&mounts));
+
+            let message = format!("{:#}", result.unwrap_err());
+            assert!(
+                message
+                    .contains("inside a vz container, run a viz-shell on a path the host has too"),
+                "{case}: {message}"
+            );
         }
     }
 
@@ -758,6 +887,7 @@ mod tests {
         );
     }
 
+    /// Order is the rule here: a deeper mount lands on top of its parent.
     #[test]
     fn run_command__read_only_parent_of_the_repository__mounted_before_it() {
         let args = args_for(&[], true);

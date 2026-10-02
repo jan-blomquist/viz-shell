@@ -1,0 +1,5 @@
+# `scan` lists more library folders, and belongs in a file of the library:
+# refused anywhere else.
+image: debian:stable-slim
+scan:
+  - ~/team

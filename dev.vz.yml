@@ -1,0 +1,35 @@
+# The developer configuration: fish and the coding agents (opencode, Codex,
+# Claude Code) on the toolchain of vz.yml. `vz new -c dev`. Portable: no
+# mounts; credentials pass by name from the host.
+name: dev
+extends: default
+image: { dockerfile: dev.Dockerfile }
+shell: fish
+
+# Its own art above the shell: this is the developer image.
+banner: |2
+                          _
+  __   __ ____         __| |  ___ __   __
+  \ \ / /|_  / _____  / _` | / _ \\ \ / /
+   \ V /  / / |_____|| (_| ||  __/ \ V /
+    \_/  /___|        \__,_| \___|  \_/
+
+state:
+  # fish's configuration and history, kept with the repository rather than
+  # taken from the host.
+  - ~/.config/fish
+  - ~/.local/share/fish
+  # The agents' sessions and settings.
+  - ~/.local/share/opencode
+  - { path: ~/.config/opencode/opencode.json, type: file, init: "{}" }
+  - ~/.codex
+  - ~/.claude
+  - { path: ~/.claude.json, type: file, init: "{}" }
+
+share:
+  # Agents do not reach the daemon; run the examples from `default`.
+  docker: false
+
+env:
+  passthrough:
+    - CLAUDE_CODE_OAUTH_TOKEN

@@ -288,7 +288,12 @@ mod tests {
 
         let error = sally().needs_user(&passwd).unwrap_err();
 
-        assert!(error.to_string().contains("/home/other"), "{error}");
+        assert!(
+            error.to_string().contains(
+                "the image's user `sally` has home /home/other, the host's is /home/sally"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -297,7 +302,12 @@ mod tests {
 
         let error = sally().needs_user(&passwd).unwrap_err();
 
-        assert!(error.to_string().contains("`ubuntu`"), "{error}");
+        assert!(
+            error.to_string().contains(
+                "the image has user `ubuntu` with uid 1000, which clashes with the host's `sally`"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -306,7 +316,12 @@ mod tests {
 
         let error = sally().needs_user(&passwd).unwrap_err();
 
-        assert!(error.to_string().contains("uid 1001"), "{error}");
+        assert!(
+            error.to_string().contains(
+                "the image has user `sally` with uid 1001, which clashes with the host's uid 1000"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
@@ -331,68 +346,98 @@ mod tests {
 
         let error = sally().needs_group(&group).unwrap_err();
 
-        assert!(error.to_string().contains("`ubuntu`"), "{error}");
+        assert!(
+            error.to_string().contains(
+                "the image has group `ubuntu` with gid 1000, which clashes with the host's `sally`"
+            ),
+            "{error}"
+        );
     }
 
     #[test]
-    fn parse_list__forms() {
-        let docker = ExtraGroup {
-            name: "docker".to_owned(),
-            gid: 969,
-        };
-        let audio = ExtraGroup {
-            name: "audio".to_owned(),
-            gid: 29,
-        };
+    fn needs_group__name_taken_with_another_gid__refuses() {
+        let group = format!("{GROUP}sally:x:1001:\n");
 
-        assert_eq!(ExtraGroup::parse_list("").unwrap(), vec![]);
-        assert_eq!(
-            ExtraGroup::parse_list("docker:969").unwrap(),
-            vec![docker.clone()]
+        let error = sally().needs_group(&group).unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "the image has group `sally` with gid 1001, which clashes with the host's `sally` (gid 1000)"
+            ),
+            "{error}"
         );
-        assert_eq!(
-            ExtraGroup::parse_list("docker:969,audio:29").unwrap(),
-            vec![docker, audio]
-        );
+    }
+
+    fn group(name: &str, gid: u32) -> ExtraGroup {
+        ExtraGroup {
+            name: name.to_owned(),
+            gid,
+        }
+    }
+
+    #[test]
+    fn parse_list__none_one_or_several__each_name_and_gid() {
+        let cases = [
+            ("", vec![]),
+            ("docker:969", vec![group("docker", 969)]),
+            (
+                "docker:969,audio:29",
+                vec![group("docker", 969), group("audio", 29)],
+            ),
+        ];
+        for (text, expected) in cases {
+            let groups = ExtraGroup::parse_list(text).unwrap();
+
+            assert_eq!(groups, expected, "{text:?}");
+        }
     }
 
     #[test]
     fn parse_list__malformed__is_refused_naming_the_item() {
-        for text in ["docker", "docker:x"] {
+        let cases = [
+            ("docker", "extra group `docker` is not `name:gid`"),
+            ("docker:x", "extra group `docker:x` has no numeric gid"),
+        ];
+        for (text, expected) in cases {
             let error = ExtraGroup::parse_list(text).unwrap_err().to_string();
 
-            assert!(error.contains(&format!("`{text}`")), "{error}");
+            assert!(error.contains(expected), "{error}");
         }
     }
 
     #[test]
-    fn line_to_add__image_groups() {
-        let docker = ExtraGroup {
-            name: "docker".to_owned(),
-            gid: 969,
-        };
+    fn line_to_add__gid_new_to_the_image__a_line_naming_it() {
         let cases = [
-            (GROUP, Some("docker:x:969:sally")),
-            ("root:x:0:\nsomething:x:969:\n", None),
+            ("the name free", GROUP, "docker:x:969:sally"),
             (
+                "the name taken: host- before it",
                 "root:x:0:\ndocker:x:101:\n",
-                Some("host-docker:x:969:sally"),
+                "host-docker:x:969:sally",
             ),
         ];
-        for (group_file, expected) in cases {
-            assert_eq!(
-                docker.line_to_add(group_file, "sally").as_deref(),
-                expected,
-                "group file: {group_file:?}"
-            );
+        for (case, group_file, expected) in cases {
+            let line = group("docker", 969).line_to_add(group_file, "sally");
+
+            assert_eq!(line.as_deref(), Some(expected), "{case}");
         }
     }
 
     #[test]
-    fn with_line__trailing_newline_or_not() {
+    fn line_to_add__gid_the_image_has__none() {
+        let group_file = "root:x:0:\nsomething:x:969:\n";
+
+        let line = group("docker", 969).line_to_add(group_file, "sally");
+
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn with_line__with_or_without_a_trailing_newline__the_line_on_its_own() {
         let cases = [("", "a\n"), ("root\n", "root\na\n"), ("root", "root\na\n")];
         for (text, expected) in cases {
-            assert_eq!(with_line(text, "a"), expected, "text: {text:?}");
+            let appended = with_line(text, "a");
+
+            assert_eq!(appended, expected, "text: {text:?}");
         }
     }
 }

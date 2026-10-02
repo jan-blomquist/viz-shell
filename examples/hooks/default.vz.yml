@@ -1,0 +1,39 @@
+# Hooks: commands run inside, as you, in the repository root, through `sh -c`.
+# `create` once per container; `attach` before every entry.
+name: default
+image: debian:stable-slim
+
+hooks:
+  create:
+    - mkdir -p ~/.local/state/hooks
+    - echo create >> ~/.local/state/hooks/log
+    - echo second >> ~/.local/state/hooks/log     # in order
+  attach:
+    - echo attach >> ~/.local/state/hooks/log
+    - pwd > ~/.local/state/hooks/pwd
+
+---
+# Its output reaches the terminal.
+name: loud
+extends: default
+hooks:
+  create:
+    - echo hello from create
+
+---
+# Keyed by the command: enabled: false removes one.
+name: quiet
+extends: default
+hooks:
+  create:
+    - { run: echo second >> ~/.local/state/hooks/log, enabled: false }
+
+---
+# A failing hook fails the entry.
+name: failing
+extends: default
+hooks:
+  create:
+    - exit 3
+
+# kept.vz.yml and kept-failing.vz.yml extend loud and failing, persistent.

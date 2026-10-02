@@ -1,0 +1,7 @@
+# The library's `trusted`, as this example's test writes it into its throwaway
+# home: on vz-debian-trixie.
+name: trusted
+extends: vz-debian-trixie
+env:
+  defaults:
+    TRUSTED: library

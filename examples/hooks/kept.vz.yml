@@ -1,0 +1,4 @@
+# Create once for the container, across a stop and start; attach for each entry.
+name: kept
+extends: loud
+persistent: true
