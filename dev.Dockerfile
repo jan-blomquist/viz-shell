@@ -16,9 +16,10 @@ ADD --checksum=sha256:fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f5
 
 FROM ${BASE}
 ARG DEBIAN_FRONTEND=noninteractive
-# fish, the shell dev.vz.yml names; xz to unpack Node.
+# fish, the shell dev.vz.yml names; xz to unpack Node; gh for pull requests
+# and releases (release-plz itself runs only as the CI action).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends fish xz-utils \
+ && apt-get install -y --no-install-recommends fish gh xz-utils \
  && rm -rf /var/lib/apt/lists/*
 # No greeting; a user's config still overrides it.
 RUN printf 'set -g fish_greeting\n' > /etc/fish/conf.d/vz.fish
