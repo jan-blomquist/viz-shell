@@ -7,6 +7,21 @@ rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jan-blomquist/viz-shell"
 authors = ["Jan Blomquist"]
+readme = "README.md"
+keywords = ["docker", "container", "dev-environment", "shell"]
+categories = ["command-line-utilities", "development-tools"]
+# The crate as published: the sources, the templates include_str! embeds, the
+# changelog release-plz writes; not the examples, the images or the repository's
+# own configurations. Anchored: unanchored patterns match at any depth.
+include = [
+    "/src/**",
+    "/templates/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-*",
+]
 
 [[bin]]
 name = "viz-shell"

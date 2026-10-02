@@ -1,0 +1,120 @@
+# Every push to master: release-plz publishes what a merged release PR bumped,
+# then opens or updates the next release PR; a new release gets the static
+# tarball attached. Configuration: release-plz.toml.
+name: release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# One run at a time; never cancel one that may be publishing.
+concurrency:
+  group: release
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      releases: ${{ steps.release.outputs.releases }}
+    steps:
+      # RELEASE_PLZ_TOKEN, a PAT, not the default GITHUB_TOKEN: a pull request
+      # opened with that triggers no workflows, and the ruleset requires the
+      # gate check to merge the release PR. release-plz pushes through the API,
+      # so the checkout keeps no credentials.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          persist-credentials: false
+
+      # rust-toolchain.toml is the one source of the version, components and target.
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustc --version
+
+      # Release first: on the release PR's merge it publishes, and release-pr
+      # then compares against the version just published.
+      - name: Release
+        id: release
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Release PR
+        uses: release-plz/action@b8d6b54b02889ff2ae2bb82e8b57c3a8fc1683a5 # v0.5.139
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Built here, not in an `on: push: tags` workflow: a tag pushed with a token
+  # does not trigger one reliably.
+  tarball:
+    needs: release-plz
+    if: needs.release-plz.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustc --version
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The static musl build; .cargo/config.toml sets the target.
+      - name: Build
+        run: cargo build --release --locked
+
+      # Version-free name: releases/latest/download/<name> stays one stable URL.
+      # Flat: the binary, its vz link, the licences and the README.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          name=viz-shell-x86_64-unknown-linux-musl
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage"
+          install -m 755 target/x86_64-unknown-linux-musl/release/viz-shell "$stage/viz-shell"
+          ln -s viz-shell "$stage/vz"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$stage/"
+          "$stage/vz" --version
+          tar -czf "$RUNNER_TEMP/$name.tar.gz" -C "$stage" --owner=0 --group=0 \
+            viz-shell vz LICENSE-MIT LICENSE-APACHE README.md
+          cd "$RUNNER_TEMP"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          cat "$name.tar.gz.sha256"
+
+      # The release exists already; the job's own token may add assets to it.
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          name=viz-shell-x86_64-unknown-linux-musl
+          gh release upload "$TAG" \
+            "$RUNNER_TEMP/$name.tar.gz" "$RUNNER_TEMP/$name.tar.gz.sha256" --clobber

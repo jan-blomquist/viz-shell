@@ -57,6 +57,11 @@ jobs:
       - name: Unit tests
         run: cargo test
 
+      # The crate as crates.io gets it, built from the package alone: a missing
+      # file fails here, before any release.
+      - name: Package
+        run: cargo package --locked
+
       - name: Build
         run: just build
 

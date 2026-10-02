@@ -1,0 +1,14 @@
+# release-plz, run by .github/workflows/release.yml: every push to master
+# updates one release PR; merging it tags v<version>, publishes to crates.io
+# and creates the GitHub release with the changelog.
+[workspace]
+changelog_update = true
+git_tag_enable = true
+git_release_enable = true
+publish = true
+# Publish only when the release PR merges, not on every push to master.
+release_always = false
+# A binary, no library API: nothing to check, and a feature is a minor even in 0.x.
+semver_check = false
+features_always_increment_minor = true
+pr_name = "chore: release v{{ version }}"

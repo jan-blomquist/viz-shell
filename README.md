@@ -62,8 +62,24 @@ a CI runner, for you and for the agents working beside you.
 
 ## Quick start
 
-Releases, with a one-line install script, are on the way. Until then, build from source (needs
-[Rust](https://rustup.rs) and [just](https://just.systems)):
+From the latest release: the static binary and its alias `vz`, into `~/.local/bin`:
+
+```sh
+url=https://github.com/jan-blomquist/viz-shell/releases/latest/download/viz-shell-x86_64-unknown-linux-musl.tar.gz
+cd "$(mktemp -d)" && curl -fsSLO "$url" && curl -fsSLO "$url.sha256"
+sha256sum -c viz-shell-x86_64-unknown-linux-musl.tar.gz.sha256
+mkdir -p ~/.local/bin && tar -xzf viz-shell-x86_64-unknown-linux-musl.tar.gz -C ~/.local/bin viz-shell vz
+```
+
+Or from crates.io, as the static musl build `vz` needs, since it mounts itself into every container:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo install viz-shell --locked --target x86_64-unknown-linux-musl
+ln -sfn viz-shell ~/.cargo/bin/vz
+```
+
+Or from a checkout (needs [Rust](https://rustup.rs) and [just](https://just.systems)):
 
 ```sh
 git clone https://github.com/jan-blomquist/viz-shell && cd viz-shell
@@ -702,6 +718,14 @@ just examples state        # one of them
 The gate, `.github/workflows/gate.yml`, runs on every pull request and on master: it builds vz on the runner,
 then runs the example tests through it, from this repository's `default` image. Every run proves the glory
 path on a clean machine: scaffolding the library, building the base, stacking, the socket share.
+
+Releases are release-plz's: `release-plz.toml`, `.github/workflows/release.yml`. Every push to master
+updates one release PR, bumped from the conventional commit titles since the last release: `feat:` a minor,
+anything else a patch, `!` or `BREAKING CHANGE:` a major from 1.0 (0.x to 1.0 is a hand edit of
+`Cargo.toml`). Merging it tags `v<version>`, publishes to crates.io, creates the GitHub release with the
+changelog and attaches the static tarball. Pull requests are squash-merged, so their titles must be
+conventional commits: `Feat/ci gate` lands under Other. The maintainer creates two secrets:
+`RELEASE_PLZ_TOKEN`, a PAT, so the release PR runs the gate, and `CARGO_REGISTRY_TOKEN`.
 
 Issues and pull requests are welcome. Run `just test` and `just examples` before sending one.
 
