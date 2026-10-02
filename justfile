@@ -24,13 +24,14 @@ test:
     cargo test
 
 # Example tests, examples/*/test.bats, against the built binary; need docker; inside vz: `vz -- just examples`.
+# bats formats for a terminal when it has one, else TAP (CI).
 examples filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     binary=${VZ:-{{binary}}}
     test -x "$binary" || { echo "no $binary: run just build first" >&2; exit 1; }
     if [[ -n "{{filter}}" ]]; then
-        bats --pretty "examples/{{filter}}/test.bats"
+        bats "examples/{{filter}}/test.bats"
     else
-        bats --recursive --pretty examples
+        bats --recursive examples
     fi
