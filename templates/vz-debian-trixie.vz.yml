@@ -28,6 +28,10 @@ persistent: false
 # true: `vz new` without a name joins a running or kept container of this configuration.
 attach: false
 
+# Only in a project: a git work tree or a folder holding a configuration, found
+# walking up from where vz runs. false: else this folder, with a warning.
+require_project: true
+
 privileges:
   sudo: false                   # true: root through sudo, docker's default capabilities, no process limit
 

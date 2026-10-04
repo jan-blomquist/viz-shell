@@ -4,7 +4,8 @@
 //! repository's configuration, else the library's; a library
 //! configuration's, the library's. A configuration never resolves to
 //! itself, so a repository's `trusted` with `extends: trusted` means the
-//! library's. `default` is the repository's alone. Invariant: one
+//! library's. `default` falls back to the library's `vz-debian-trixie`.
+//! Invariant: one
 //! configuration per name per scope; the chain is a straight line, each
 //! configuration after its one parent, the one asked for last; unknown
 //! names and cycles are refused.
@@ -101,19 +102,23 @@ pub fn resolve_chain<'t>(
     Ok(upward)
 }
 
-/// The configuration asked for: the repository's, else the library's. The
-/// `default` is the repository's alone: the library holds none.
+/// The configuration asked for, `default` without a name: the
+/// repository's, else the library's; for `default`, else the library's
+/// `vz-debian-trixie`, which a first run writes.
 fn select<'t>(table: &'t Table, wanted: Option<&str>) -> anyhow::Result<&'t Config> {
-    match wanted {
-        Some(name) => find(table, &[Scope::Repository, Scope::Library], name, None)
-            .ok_or_else(|| unknown(table, name)),
-        None => match find(table, &[Scope::Repository], DEFAULT_CONFIG, None) {
-            Some(config) => Ok(config),
-            None => bail!(
-                "no default configuration: add vz.yml with `extends: {LIBRARY_BASE}`, or run \
-                 with -c NAME"
-            ),
-        },
+    let name = wanted.unwrap_or(DEFAULT_CONFIG);
+    if let Some(config) = find(table, &[Scope::Repository, Scope::Library], name, None) {
+        return Ok(config);
+    }
+    match name == DEFAULT_CONFIG {
+        true => find(table, &[Scope::Library], LIBRARY_BASE, None).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no default configuration: no `{DEFAULT_CONFIG}` in the repository or the \
+                 library, no `{LIBRARY_BASE}` in the library; scanned {}",
+                searched(table)
+            )
+        }),
+        false => Err(unknown(table, name)),
     }
 }
 
@@ -167,11 +172,6 @@ fn find<'t>(
 
 /// `no configuration `x``, with where the scan looked and the names it found.
 fn unknown(table: &Table, name: &str) -> anyhow::Error {
-    let searched: Vec<String> = table
-        .searched
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect();
     let mut found: Vec<&str> = table.configs.keys().map(|key| key.name.as_str()).collect();
     found.sort();
     found.dedup();
@@ -181,8 +181,18 @@ fn unknown(table: &Table, name: &str) -> anyhow::Error {
     };
     anyhow::anyhow!(
         "no configuration `{name}`; scanned {}; found {found}",
-        searched.join(", ")
+        searched(table)
     )
+}
+
+/// The folders, then the `-f` files, the scan looked in.
+fn searched(table: &Table) -> String {
+    let searched: Vec<String> = table
+        .searched
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    searched.join(", ")
 }
 
 /// A configuration as `vz configs` shows it.
@@ -247,6 +257,7 @@ fn changes(layer: &Layer) -> Vec<String> {
         }),
         switch(layer.persistent, "persistent"),
         switch(layer.attach, "attach"),
+        switch(layer.require_project, "project required"),
     ]
     .into_iter()
     .flatten()
@@ -506,29 +517,56 @@ mod tests {
         assert_eq!(chain, labels(&["repository default"]));
     }
 
+    /// A file's path and text.
+    type File<'a> = (&'a str, &'a str);
+
     #[test]
-    fn resolve_chain__no_default_in_the_repository__refused_even_with_one_in_the_library() {
-        let cases: [(&str, &[(&str, &str)]); 2] = [
-            ("none anywhere", &[(CI, "name: ci\nimage: debian\n")]),
+    fn resolve_chain__default_asked_for_or_not__repository_then_library_then_the_base() {
+        let base = (LIBRARY_BASE_FILE, "name: vz-debian-trixie\nimage: debian\n");
+        let library_default = (LIBRARY_DEFAULT, "extends: vz-debian-trixie\n");
+        let repository_default = (APP, "extends: default\n");
+        let cases: [(&str, Vec<File>, &[&str]); 3] = [
             (
-                "one in the library",
+                "the repository's",
+                vec![base, library_default, repository_default],
                 &[
-                    (LIBRARY_DEFAULT, "image: alpine\n"),
-                    (CI, "name: ci\nimage: debian\n"),
+                    "library vz-debian-trixie",
+                    "library default",
+                    "repository default",
                 ],
             ),
+            (
+                "none in the repository: the library's",
+                vec![base, library_default, (CI, "name: ci\nimage: debian\n")],
+                &["library vz-debian-trixie", "library default"],
+            ),
+            (
+                "none in either: the library's base",
+                vec![base, (CI, "name: ci\nimage: debian\n")],
+                &["library vz-debian-trixie"],
+            ),
         ];
-        for (case, files) in cases {
-            let message = message(chain(files, None));
+        for (case, files, expected) in cases {
+            for wanted in [None, Some("default")] {
+                let chain = chain(&files, wanted).unwrap();
 
-            assert!(
-                message.contains(
-                    "no default configuration: add vz.yml with `extends: vz-debian-trixie`, \
-                     or run with -c NAME"
-                ),
-                "{case}: {message}"
-            );
+                assert_eq!(chain, labels(expected), "{case}, {wanted:?}");
+            }
         }
+    }
+
+    #[test]
+    fn resolve_chain__no_default_and_no_base__refused_naming_the_three_places() {
+        let files = [(CI, "name: ci\nimage: debian\n")];
+
+        let message = message(chain(&files, None));
+
+        assert_eq!(
+            message,
+            "no default configuration: no `default` in the repository or the library, \
+             no `vz-debian-trixie` in the library; \
+             scanned /home/sally/.config/viz-shell, /home/sally/repos/app"
+        );
     }
 
     /// A row of `vz configs`: name, file, extends, changes.
@@ -584,6 +622,11 @@ mod tests {
             ("two entries", "mounts: [~/a, ~/b]\n", "2 mounts"),
             ("the banner off", "banner: false\n", "no banner"),
             ("banner art", "banner: \"hi\"\n", "banner art"),
+            (
+                "require_project off",
+                "require_project: false\n",
+                "no project required",
+            ),
         ];
         for (case, text, expected) in cases {
             let table = table(&[(APP, text)]).unwrap();

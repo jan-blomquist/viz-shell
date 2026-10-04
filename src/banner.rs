@@ -40,6 +40,9 @@ pub struct Session<'a> {
     pub persistent: bool,
     pub home: &'a Path,
     pub repo_root: &'a Path,
+    /// A git work tree or a folder holding a configuration; else the folder
+    /// vz runs in.
+    pub in_project: bool,
     pub branch: Option<&'a str>,
     /// The configuration chain, one link per step, in fold order.
     pub chain: &'a [Link],
@@ -122,7 +125,13 @@ pub fn facts(session: &Session) -> Vec<(&'static str, String)> {
     let mut facts = vec![
         ("Version", VERSION.to_owned()),
         ("Session", format!("{how}, {lifetime}")),
-        ("Repo", tilde(session.repo_root, home)),
+        (
+            "Repo",
+            match session.in_project {
+                true => tilde(session.repo_root, home),
+                false => format!("{} (no project)", tilde(session.repo_root, home)),
+            },
+        ),
     ];
     if let Some(branch) = session.branch {
         facts.push(("Branch", branch.to_owned()));
@@ -213,6 +222,7 @@ mod tests {
             persistent: false,
             home: Path::new("/home/sally"),
             repo_root: Path::new("/home/sally/repos/app"),
+            in_project: true,
             branch: Some("main"),
             chain: &[],
             config_files: files,
@@ -327,6 +337,24 @@ mod tests {
         let facts = facts(&nothing_set());
 
         assert_eq!(value(&facts, "Branch"), None);
+    }
+
+    #[test]
+    fn facts__in_a_project_or_not__repo_marked_when_not() {
+        let cases = [
+            ("in a project", true, "~/repos/app"),
+            ("not in one", false, "~/repos/app (no project)"),
+        ];
+        for (case, in_project, expected) in cases {
+            let session = Session {
+                in_project,
+                ..session(&[], &[])
+            };
+
+            let facts = facts(&session);
+
+            assert_eq!(value(&facts, "Repo"), Some(expected), "{case}");
+        }
     }
 
     #[test]

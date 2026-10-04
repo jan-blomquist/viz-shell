@@ -39,7 +39,7 @@ pub use effective::{
 };
 pub use parse::{BuildSpec, ImageSource, MountMode, StateKind, is_env_name, with_default_tag};
 pub use paths::{expand_path, resolve_host_path, shown, substitute, tilde};
-pub use scan::Source;
+pub use scan::{Source, is_config_file};
 pub use template::{needs_scaffold, scaffold};
 
 /// The filesystem as the scan sees it.
@@ -403,6 +403,7 @@ mod tests {
 
     const LIBRARY_BASE: &str = "# vz-debian-trixie (~/.config/viz-shell/vz-debian-trixie.vz.yml)";
     const LIBRARY_TRUSTED: &str = "# trusted (~/.config/viz-shell/trusted.vz.yml)";
+    const LIBRARY_DEFAULT: &str = "# default (~/.config/viz-shell/default.vz.yml)";
     const LIBRARY_IMAGE: &str = "# image: debian:stable-slim (vz-debian-trixie, \
                                  ~/.config/viz-shell/vz-debian-trixie.vz.yml)";
 
@@ -414,6 +415,41 @@ mod tests {
                 library_example(),
                 Some("vz-debian-trixie"),
                 lines(&[LIBRARY_BASE, LIBRARY_IMAGE]),
+            ),
+            (
+                "library: no repository configuration, the library's base by default",
+                library_example(),
+                None,
+                lines(&[LIBRARY_BASE, LIBRARY_IMAGE]),
+            ),
+            (
+                "library: a library default, by default",
+                [
+                    library_example(),
+                    vec![written(
+                        ".config/viz-shell/default.vz.yml",
+                        "extends: vz-debian-trixie\n",
+                    )],
+                ]
+                .concat(),
+                None,
+                lines(&[LIBRARY_BASE, LIBRARY_DEFAULT, LIBRARY_IMAGE]),
+            ),
+            (
+                "library: a scan-only file beside the library default, no second default",
+                [
+                    library_example(),
+                    vec![
+                        written(".config/viz-shell/scan.vz.yml", "scan: [~/team]\n"),
+                        written(
+                            ".config/viz-shell/default.vz.yml",
+                            "extends: vz-debian-trixie\n",
+                        ),
+                    ],
+                ]
+                .concat(),
+                None,
+                lines(&[LIBRARY_BASE, LIBRARY_DEFAULT, LIBRARY_IMAGE]),
             ),
             (
                 "library: -c trusted without the repository's own, the library's",
@@ -561,9 +597,9 @@ mod tests {
                 "resolution/two-folders/two/trusted.vz.yml",
             ),
         ];
-        let no_default = vec![written(
-            ".config/viz-shell/vz-debian-trixie.vz.yml",
-            "name: vz-debian-trixie\nimage: debian:stable-slim\n",
+        let no_default_no_base = vec![written(
+            ".config/viz-shell/trusted.vz.yml",
+            "name: trusted\nimage: debian:stable-slim\n",
         )];
         let cases: Vec<(&str, Layout, Option<&str>, &str)> = vec![
             (
@@ -648,10 +684,11 @@ mod tests {
                 "two configurations named `trusted` in the library: in ",
             ),
             (
-                "no default",
-                no_default,
+                "no default, no base",
+                no_default_no_base,
                 None,
-                "no default configuration: add vz.yml with `extends: vz-debian-trixie`, or run with -c NAME",
+                "no default configuration: no `default` in the repository or the library, \
+                 no `vz-debian-trixie` in the library; scanned ",
             ),
         ];
         for (case, files, config, expected) in cases {

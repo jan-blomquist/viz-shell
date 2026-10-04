@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # The library: configurations any repository extends by name, and runs by
-# name; no default of its own. These run from a second throwaway repository,
-# ~/repos/bare; a test that wants the example's app.vz.yml in it copies it there.
+# name; its base, or its own default, when the repository has none. These run
+# from a second throwaway repository, ~/repos/bare; a test that wants the
+# example's app.vz.yml in it copies it there.
 
 load ../helpers
 
@@ -15,11 +16,12 @@ setup_file() {
     git init -q "$repo"
 }
 
-# Each test starts in the bare repository, without app.vz.yml.
+# Each test starts in the bare repository, without app.vz.yml, and the library
+# without a default.
 setup() {
     example_setup
     cd "$repo"
-    rm -f app.vz.yml
+    rm -f app.vz.yml "$library/default.vz.yml"
 }
 
 teardown_file() {
@@ -29,15 +31,37 @@ teardown_file() {
 
 run_vz() { "$vz_bin" "$@"; }
 with_repository_configs() { cp "$example_dir/app.vz.yml" "$repo/"; }
-no_default() { run_vz -- true 2>&1; }
+with_library_default() {
+    printf 'extends: vz-debian-trixie\nenv: { defaults: { WHO: library-default } }\n' \
+        > "$library/default.vz.yml"
+}
+# --show-effective-config's chain lines.
+chain_lines() { run_vz --show-effective-config | grep -v '^# image:' | grep '^# '; }
 # vz configs: name, file, what it extends.
 config_rows() { run_vz configs | awk 'NR > 1 { print $1, $2, $3 }'; }
 
-@test "a repository without configuration has no default" {
-    run --separate-stderr no_default
-    assert_failure
-    assert_output --partial \
-        'no default configuration: add vz.yml with `extends: vz-debian-trixie`, or run with -c NAME'
+# UNRUN: verify with just examples library
+@test "a repository without configuration runs the template default" {
+    run --separate-stderr run_vz -- sh -c 'echo "$WHO $EVERYWHERE"'
+    assert_success
+    assert_output "library yes"
+}
+
+# UNRUN: verify with just examples library
+@test "a library default runs by default" {
+    with_library_default
+    run --separate-stderr run_vz -- sh -c 'echo "$WHO"'
+    assert_success
+    assert_output "library-default"
+}
+
+# UNRUN: verify with just examples library
+@test "a library default: the base, then it" {
+    with_library_default
+    run --separate-stderr chain_lines
+    assert_success
+    assert_output "# vz-debian-trixie (~/.config/viz-shell/vz-debian-trixie.vz.yml)
+# default (~/.config/viz-shell/default.vz.yml)"
 }
 
 @test "-c runs a library configuration by name" {
