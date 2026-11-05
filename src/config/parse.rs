@@ -38,7 +38,7 @@ pub struct Layer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageSource>,
     /// Where state is kept: relative to the file's folder, `~/…` or
-    /// absolute. Unset: `.vz_state` at the git root.
+    /// absolute. Unset: `.vz_state` at the project root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<String>,
     /// The banner above an interactive shell: `true` for the built-in art,
@@ -56,6 +56,10 @@ pub struct Layer {
     /// configuration, when one runs or is kept, instead of creating another.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attach: Option<bool>,
+    /// Only in a project: a git work tree or a folder holding a
+    /// configuration. Unset: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_project: Option<bool>,
     /// What of the host the shell shares.
     #[serde(default, skip_serializing_if = "Share::is_unset")]
     pub share: Share,
@@ -457,6 +461,16 @@ fn check_document(document: &Layer) -> anyhow::Result<()> {
 }
 
 impl Layer {
+    /// A scan declaration, not a configuration: `scan:` and no other key.
+    pub fn is_scan_only(&self) -> bool {
+        !self.scan.is_empty()
+            && *self
+                == Layer {
+                    scan: self.scan.clone(),
+                    ..Layer::default()
+                }
+    }
+
     /// Paths and names are well formed, each once per list, and `init` is
     /// given only to a file.
     fn check_entries(&self) -> anyhow::Result<()> {
@@ -618,6 +632,26 @@ mod tests {
             let names = names(text);
 
             assert_eq!(names, expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn is_scan_only__scan_and_nothing_else__true() {
+        let cases = [
+            ("scan alone", "scan: [~/team]\n", true),
+            (
+                "scan with an image",
+                "scan: [~/team]\nimage: debian\n",
+                false,
+            ),
+            ("scan with a name", "name: team\nscan: [~/team]\n", false),
+            ("an empty map", "{}\n", false),
+            ("no scan", "image: debian\n", false),
+        ];
+        for (case, text, expected) in cases {
+            let layer = parse(text).unwrap().remove(0);
+
+            assert_eq!(layer.is_scan_only(), expected, "{case}");
         }
     }
 

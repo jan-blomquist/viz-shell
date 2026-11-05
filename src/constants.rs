@@ -173,7 +173,7 @@ pub const CONTAINER_ENV: &str = "VZ_CONTAINER";
 pub const CONTAINER_CONFIG_ENV: &str = "VZ_CONTAINER_CONFIG";
 
 /// Where state is kept unless `state_dir` says otherwise: this folder at the
-/// git root. Each state path is stored under it at its container path.
+/// project root. Each state path is stored under it at its container path.
 pub const DEFAULT_STATE_DIR: &str = ".vz_state";
 
 /// A state path starting with this is under the home.

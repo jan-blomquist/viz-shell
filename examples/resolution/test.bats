@@ -4,7 +4,7 @@
 # one refusal; src/config/mod.rs
 # (load__each_resolution_example__refused_with_its_message) loads each of them
 # and checks its message. Here, one refusal goes through the binary end to end.
-# The library without a default: examples/library.
+# The default's fallbacks to the library: examples/library.
 
 load ../helpers
 

@@ -453,6 +453,23 @@ mod tests {
     }
 
     #[test]
+    fn load_files__outside_a_git_work_tree__no_warning_logged() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join(".env"), "SECRET=1\n").unwrap();
+        let file = EnvFile {
+            path: ".env".to_owned(),
+            required: true,
+        };
+        let log = Log::default();
+
+        tracing::subscriber::with_default(log.subscriber(), || {
+            load_files(&[file], &paths_in(folder.path())).unwrap()
+        });
+
+        assert!(!log.text().contains("is tracked by git"), "{}", log.text());
+    }
+
+    #[test]
     fn load_files__tracked_by_git__still_loaded() {
         let (loaded, _) = load_tracked_env_file();
 

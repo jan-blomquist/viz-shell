@@ -44,6 +44,7 @@ impl Layer {
             shell: over.shell.clone().or(self.shell),
             persistent: over.persistent.or(self.persistent),
             attach: over.attach.or(self.attach),
+            require_project: over.require_project.or(self.require_project),
             share: self.share.merge(&over.share),
             privileges: self.privileges.merge(&over.privileges),
             env: self.env.merge(&over.env),
@@ -416,6 +417,31 @@ persistent: false
             let persistent = effective(text, config).persistent;
 
             assert_eq!(persistent, expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn merge__require_project__on_unless_a_layer_turns_it_off() {
+        let text = "\
+image: debian
+---
+name: anywhere
+extends: default
+require_project: false
+---
+name: projects
+extends: anywhere
+require_project: true
+";
+        let cases = [
+            ("unset", None, true),
+            ("turned off", Some("anywhere"), false),
+            ("turned on again", Some("projects"), true),
+        ];
+        for (case, config, expected) in cases {
+            let require_project = effective(text, config).require_project;
+
+            assert_eq!(require_project, expected, "{case}");
         }
     }
 

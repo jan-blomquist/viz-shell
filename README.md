@@ -42,8 +42,8 @@ a CI runner, for you and for the agents working beside you.
 
 ## Why vz
 
-- **Your repo, mounted.** `cd` into any git repository and type `vz new`. The repository is there,
-  read-write, at the same path as on your host.
+- **Your repo, mounted.** `cd` into any git repository, or a folder with a `vz.yml`, and type
+  `vz new`. The repository is there, read-write, at the same path as on your host.
 - **You, inside.** Same user, uid, groups, home and paths. Files you create stay yours; git and ssh
   just work; paths in errors match your editor's.
 - **Any image.** Official images work unchanged, or `vz` builds the repository's own Dockerfile.
@@ -171,6 +171,14 @@ vz ls               # this repository's containers; --all for every repository's
 vz kill 0 api       # removes containers; --all for all of this repository's
 ```
 
+The repository is the project around the current directory: the git work tree's top, else the
+nearest folder, this one or above, holding a configuration file, stopping at
+`GIT_CEILING_DIRECTORIES` as git does; inside a git work tree, its top wins. Outside any project
+`vz` refuses with ``not in a project: no .git or vz.yml here or above``, unless the configuration
+sets `require_project: false` (only a library one applies there): then it runs in the current folder
+as its repository, with a warning, and the banner reads `Repo: ~/Downloads (no project)`. `/` is
+refused either way. Without git: no `Branch:`, no warning for a tracked env file.
+
 `vz` alone lists the commands. `vz` (the alias of `viz-shell`) reads the [configurations](#configurations)
 of the repository and your library, and runs the chain of the one asked for, `default` without `-c`. It pulls or
 builds the image if missing, and runs a container, removed on exit unless `persistent`, with its
@@ -239,13 +247,15 @@ Unknown keys in a configuration are refused, naming the line.
 
 A configuration is one YAML document: an image, state, mounts, env, hooks, and what the shell may
 share and do. `vz new` runs `default`; `vz new -c NAME` runs `NAME`, after the configurations it
-extends. Two places hold them: the **repository**, at the git root, and the **library**,
-`~/.config/viz-shell/` (or under `$XDG_CONFIG_HOME`), for configurations a repository extends by name.
+extends. Two places hold them: the **repository**, at the project root ([Use](#use)), and the
+**library**, `~/.config/viz-shell/` (or under `$XDG_CONFIG_HOME`), for configurations a repository
+extends by name.
 
 1. **Files.** `vz.yml`, `*.vz.yml` and `*.vz.yaml`, in the repository root, the library, and the
    folders the library's files list under `scan:`; nothing else is read, and a filename means nothing
    more. `-f FILE` reads another file, any YAML, as one of the repository's. `scan:` belongs in a file
-   of the library folder, and is refused anywhere else.
+   of the library folder, and is refused anywhere else; a document holding only `scan:` declares
+   folders and is no configuration: no name, not listed, not extended.
 2. **Documents.** A file holds one or more documents, separated by `---`; each is a configuration.
 3. **Names.** `name:` is required, but for one configuration in each scope (the repository, the
    library with its `scan:` folders): the one without a name is `default`. Two without, or two of one
@@ -256,18 +266,20 @@ extends. Two places hold them: the **repository**, at the git root, and the **li
    library's. An unknown name is refused, listing the folders scanned and the names found; a cycle,
    naming it.
 5. **Chain.** The parent's chain, then the configuration; later wins: settings (`image`, `state_dir`,
-   `banner`, `shell`, `persistent`, `attach`) are replaced, `share` and `privileges` per key,
-   `env.defaults` per variable name; in every list, an entry with an earlier one's key (a path; a name
-   for passthrough; the command for hooks) updates it in its place, a new one comes last, and
-   `enabled: false` removes one. A key twice in one list is refused. Paths are made absolute as each
-   file is read, relative to its own folder, so an entry is removed however either file writes it.
+   `banner`, `shell`, `persistent`, `attach`, `require_project`) are replaced, `share` and
+   `privileges` per key, `env.defaults` per variable name; in every list, an entry with an earlier
+   one's key (a path; a name for passthrough; the command for hooks) updates it in its place, a new
+   one comes last, and `enabled: false` removes one. A key twice in one list is refused. Paths are
+   made absolute as each file is read, relative to its own folder, so an entry is removed however
+   either file writes it.
 6. **Images.** `image:` follows the chain: a Dockerfile declaring `ARG BASE` builds on the image
    before it; one without it, or an image reference, replaces ([Images](#images)). `ARG BASE` without
    a default requires an image before it, and is refused without one; `docker build .` then needs
    `--build-arg BASE=…`; `# check=skip=InvalidDefaultArgInFrom` under `# syntax=` silences BuildKit's
    lint about the missing default. An image holds only what its chain extends.
-7. **Default.** Without `-c`: the repository's `default`. The library holds none: without one, `vz new`
-   says ``no default configuration: add vz.yml with `extends: vz-debian-trixie`, or run with -c NAME``.
+7. **Default.** Without `-c`, as with `-c default`: the repository's `default`, else the library's,
+   else the library's `vz-debian-trixie`, which the first run writes; `Chain:` says which. With none
+   of the three, `vz` refuses, naming them.
 
 A repository writes the configurations it needs, `trusted` too:
 
@@ -351,6 +363,7 @@ name: `vz-1-app-api`. Labels (`vz.repo`, `vz.index`, `vz.name`, `vz.config`, …
 ```yaml
 persistent: true    # the container outlives the shell that created it; `vz kill` removes it
 attach: true        # `vz new` without a name joins this repository's container of the same configuration
+require_project: false   # outside a project, run in the current folder (see Use); default true
 ```
 
 | `persistent` | `attach` | `vz new` | the creating shell exits | the next `vz new` |
@@ -482,7 +495,8 @@ Alpine: `addgroup -g "$VZ_GID" "$VZ_GROUP" && adduser -D -u "$VZ_UID" -G "$VZ_GR
 ## State
 
 Container paths whose contents survive the container. Each is kept in the state folder, `.vz_state/`
-at the git root by default, at its own container path and mounted back; the host's own files are untouched.
+at the project root by default, at its own container path and mounted back; the host's own files are
+untouched.
 
 ```yaml
 state_dir: .vz_state                   # optional: the state folder, see below
@@ -500,7 +514,7 @@ state:
 - Expanded: `{ path, type: dir | file, init, enabled }`. `init` is a file's content when `vz`
   creates it; never rewritten.
 - `state_dir`: relative to the configuration file's folder, `~/…` or absolute. Without it every configuration,
-  `-c` ones included, shares `.vz_state/` at the git root.
+  `-c` ones included, shares `.vz_state/` at the project root.
 - `vz` creates missing entries as you. Delete the state folder to start over; ignoring it in git is up to you,
   but keep it out of Docker build contexts: `**/.vz_state/` in `.dockerignore`.
 - A state folder hides what the image had at that path, and belongs to you.
@@ -665,7 +679,7 @@ in this repository's `default` configuration, which shares the host's daemon (`v
 
 | Recipe | Shows |
 |---|---|
-| [`pull-image`](examples/pull-image) | the smallest configuration: one document, no `name:`, the default |
+| [`pull-image`](examples/pull-image) | the smallest configuration: one document, no `name:`, the default; a folder with `vz.yml` and no git; outside a project, refused, or run with `require_project: false` |
 | [`build-dockerfile`](examples/build-dockerfile) | building from a Dockerfile, with args |
 | [`image-stack`](examples/image-stack) | `ARG BASE` stacking along the chain, on a built image and on a reference; replacing Dockerfiles; `deep` extending another document's `tools`; a configuration that extends nothing; images named by their folder |
 | [`baked-user`](examples/baked-user) | your user baked into the image, installing into your home |
@@ -674,9 +688,9 @@ in this repository's `default` configuration, which shares the host's daemon (`v
 | [`configs`](examples/configs) | documents of one file, each extending `default`: overriding and removing entries; `debian12` in a file of its own; `trusted` with `extends: trusted` reaching the library's; `VZ_CONFIG` |
 | [`docker`](examples/docker) | the host's docker daemon inside, as you; off in another configuration |
 | [`env`](examples/env) | every environment source and their order, a later configuration's overrides, values kept out of sight, the `TERM` fallback |
-| [`library`](examples/library) | no default in the library; a library configuration run by name; a repository's nameless default `extends: vz-debian-trixie`; its `trusted` on the library's; `vz configs`; a library filename meaning nothing |
+| [`library`](examples/library) | a repository without configuration runs the library's base; a library `default` runs by default; a library configuration run by name; a repository's nameless default `extends: vz-debian-trixie`; its `trusted` on the library's; `vz configs`; a library filename meaning nothing |
 | [`local`](examples/local) | a configuration of your own: `sally.vz.yml` extending the default, a value, a mount's mode, an added mount, `sally.Dockerfile` stacked on its image; `joe.vz.yml` with the banner, its `Chain:` and `Config:` |
-| [`resolution`](examples/resolution) | what reading and resolving refuse: an unknown name, a cycle, two names in `extends`, `profiles:`, two without `name:`, one name twice, a nameless one beside a `default`, `ARG BASE` with nothing before it, `scan:` outside the library, one library name in two folders, no default |
+| [`resolution`](examples/resolution) | what reading and resolving refuse: an unknown name, a cycle, two names in `extends`, `profiles:`, two without `name:`, one name twice, a nameless one beside a `default`, `ARG BASE` with nothing before it, `scan:` outside the library, one library name in two folders |
 | [`privileges`](examples/privileges) | the secure floor by default, its process limit; sudo in another configuration; an image without sudo |
 | [`host-network`](examples/host-network) | the host's network in another configuration, docker's own by default, `host.docker.internal` |
 | [`shell`](examples/shell) | fish as the shell, its configuration as state; a missing shell's fallback |

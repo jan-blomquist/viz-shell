@@ -1,7 +1,8 @@
 //! Step 4, name: each document becomes a [`Config`], named by its `name:`
 //! key. Invariant: in each scope, at most one configuration goes without a
 //! name, and it is `default`; two nameless ones are refused, naming both
-//! files. A configuration named `default` is an ordinary one.
+//! files. A configuration named `default` is an ordinary one. A document
+//! holding only `scan:` is a scan declaration, not a configuration.
 
 use anyhow::bail;
 
@@ -36,8 +37,12 @@ impl Config {
 }
 
 /// Every document named: its `name:`, else, as its scope's one nameless
-/// configuration, `default`.
+/// configuration, `default`. Scan declarations are dropped.
 pub fn name(documents: Vec<Document>) -> anyhow::Result<Vec<Config>> {
+    let documents: Vec<Document> = documents
+        .into_iter()
+        .filter(|document| !document.layer.is_scan_only())
+        .collect();
     for scope in [Scope::Repository, Scope::Library] {
         let nameless: Vec<&Source> = documents
             .iter()
@@ -146,6 +151,42 @@ mod tests {
                 "named default, an ordinary name",
                 vec![document(APP, Repository, Some("default"))],
                 &["default"],
+            ),
+        ];
+        for (case, documents, expected) in cases {
+            let configs = name(documents).unwrap();
+
+            let names: Vec<&str> = configs.iter().map(|config| config.name.as_str()).collect();
+            assert_eq!(names, expected, "{case}");
+        }
+    }
+
+    /// A nameless document of `path` holding only `scan: [~/team]`.
+    fn scan_only(path: &str) -> Document {
+        Document {
+            layer: Layer {
+                scan: vec!["~/team".to_owned()],
+                ..Layer::default()
+            },
+            ..document(path, Scope::Library, None)
+        }
+    }
+
+    #[test]
+    fn name__scan_only_documents__not_configurations() {
+        use Scope::Library;
+        const SCAN: &str = "/home/sally/.config/viz-shell/scan.vz.yml";
+        let cases: [(&str, Vec<Document>, &[&str]); 3] = [
+            ("alone", vec![scan_only(SCAN)], &[]),
+            (
+                "beside the library's nameless default",
+                vec![scan_only(SCAN), document(LIBRARY, Library, None)],
+                &["default"],
+            ),
+            (
+                "beside a named one",
+                vec![scan_only(SCAN), document(LIBRARY, Library, Some("trusted"))],
+                &["trusted"],
             ),
         ];
         for (case, documents, expected) in cases {

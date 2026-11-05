@@ -34,6 +34,7 @@ use crate::constants::{
 use crate::containers::{Container, Target};
 use crate::engine::{Created, Engine};
 use crate::env::CliEnv;
+use crate::repo::Root;
 use crate::session::{Enter, Session};
 use crate::share::DockerSocket;
 use crate::user::User;
@@ -79,9 +80,10 @@ fn launched(cli: &Cli, how: Launch, command: &[String]) -> anyhow::Result<()> {
     std::process::exit(exit_code);
 }
 
-/// What to load, from the command line, the repository and the host user.
-/// A first run writes the library first.
-fn request(cli: &Cli, user: &User) -> anyhow::Result<Request> {
+/// What to load, from the command line, the project and the host user.
+/// A first run writes the library first. Outside a project, `root` is the
+/// current directory: only library configurations apply there.
+fn request(cli: &Cli, user: &User, root: &Root) -> anyhow::Result<Request> {
     let library_dir = library_dir()?;
     scaffold_library(&library_dir);
     let extra_files = cli
@@ -93,7 +95,7 @@ fn request(cli: &Cli, user: &User) -> anyhow::Result<Request> {
         .collect::<anyhow::Result<_>>()?;
     Ok(Request {
         home: user.home.clone(),
-        repo_root: repo::root()?,
+        repo_root: root.path().to_owned(),
         library_dir,
         extra_files,
         config: config_name(cli.config.clone(), std::env::var(CONFIG_ENV).ok())
@@ -114,7 +116,7 @@ fn library_dir() -> anyhow::Result<PathBuf> {
     Ok(strategy.config_dir().join(LIBRARY_DIR))
 }
 
-/// A first run: the library has no `default`, so vz writes the templates
+/// A first run: the library has no `vz-debian-trixie`, so vz writes the templates
 /// missing from it. A failure leaves the library as it is, never stops vz.
 fn scaffold_library(dir: &Path) {
     if !config::needs_scaffold(dir, &RealFiles) {
@@ -134,7 +136,7 @@ fn scaffold_library(dir: &Path) {
 /// and changes.
 fn print_configs(cli: &Cli) -> anyhow::Result<()> {
     let user = User::of_host()?;
-    let request = request(cli, &user)?;
+    let request = request(cli, &user, &repo::root()?)?;
     let table = config::read_configs(&request, &RealFiles)?;
     let rows = config::list(&table).into_iter().map(|info| {
         let changes = match info.changes.is_empty() {
@@ -191,7 +193,8 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     );
     let user = User::of_host()?;
     debug!("host user: {user:?}");
-    let request = request(cli, &user)?;
+    let root = repo::root()?;
+    let request = request(cli, &user, &root)?;
     let loaded = config::load(&request, &RealFiles).context("in the configuration")?;
     let config_name = request.config.as_deref();
     let config = &loaded.effective;
@@ -234,6 +237,15 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
     if cli.show_env {
         print_env(&config::banner_line(&chain), &environment);
         return Ok(0);
+    }
+    // Before anything is created: outside a project only if the
+    // configuration allows it, never at /.
+    root.check(config.require_project)?;
+    if !root.is_project() {
+        warn!(
+            "not in a project: running in {}; require_project: true to refuse",
+            repo_root.display()
+        );
     }
 
     let state_dir = match &config.state_dir {
@@ -313,6 +325,7 @@ async fn launch(cli: &Cli, how: Launch<'_>, command: &[String]) -> anyhow::Resul
             persistent,
             home: &user.home,
             repo_root: &repo_root,
+            in_project: root.is_project(),
             branch: branch.as_deref(),
             chain,
             config_files: &config_files,
@@ -448,7 +461,7 @@ const MAX_NAME_RETRIES: usize = 10;
 async fn list(all: bool) -> anyhow::Result<()> {
     let repo_root = match all {
         true => None,
-        false => Some(repo::root()?),
+        false => Some(repo::root()?.path().to_owned()),
     };
     let engine = Engine::detect().await?;
     let found = engine.containers(repo_root.as_deref()).await?;
@@ -489,9 +502,10 @@ async fn list(all: bool) -> anyhow::Result<()> {
 
 /// `vz kill`: removes the named containers of this repository, or all of them.
 async fn kill(targets: &[String], all: bool) -> anyhow::Result<()> {
-    let repo_root = repo::root()?;
+    let root = repo::root()?;
+    let repo_root = root.path();
     let engine = Engine::detect().await?;
-    let existing = engine.containers(Some(&repo_root)).await?;
+    let existing = engine.containers(Some(repo_root)).await?;
     let chosen: Vec<&Container> = match all {
         true => existing.iter().collect(),
         false => targets

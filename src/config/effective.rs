@@ -28,6 +28,7 @@ pub struct Effective {
     pub shell: Option<String>,
     pub persistent: bool,
     pub attach: bool,
+    pub require_project: bool,
     pub share: Shared,
     pub privileges: Granted,
     pub env: EffectiveEnv,
@@ -184,6 +185,7 @@ impl Effective {
             shell: layer.shell,
             persistent: layer.persistent.unwrap_or(false),
             attach: layer.attach.unwrap_or(false),
+            require_project: layer.require_project.unwrap_or(true),
             share: Shared {
                 docker: layer.share.docker.unwrap_or(false),
                 host_network: layer.share.host_network.unwrap_or(false),
@@ -259,6 +261,7 @@ impl Effective {
             shell: self.shell.clone(),
             persistent: self.persistent.then_some(true),
             attach: self.attach.then_some(true),
+            require_project: Some(self.require_project),
             share: Share {
                 docker: self.share.docker.then_some(true),
                 host_network: self.share.host_network.then_some(true),
@@ -711,6 +714,23 @@ env:
             "image: debian\nbanner: |\n  == app ==\n    v1\n",
         ),
     ];
+
+    #[test]
+    fn to_yaml__require_project__written_either_way() {
+        let cases = [
+            ("unset", "image: debian\n", "require_project: true\n"),
+            (
+                "off",
+                "image: debian\nrequire_project: false\n",
+                "require_project: false\n",
+            ),
+        ];
+        for (case, text, expected) in cases {
+            let yaml = effective(text, None).to_yaml().unwrap();
+
+            assert!(yaml.contains(expected), "{case}: {yaml}");
+        }
+    }
 
     #[test]
     fn to_yaml__banner__false_true_or_the_art() {
